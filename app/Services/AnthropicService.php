@@ -27,7 +27,7 @@ class AnthropicService
      * @throws ConnectionException
      * @throws RequestException
      */
-    public function sendMessage(array $messages, ?string $system = null): array
+    public function sendMessage(array $messages, ?string $system = null, ?float $temperature = null): array
     {
         $payload = [
             'model' => $this->model,
@@ -37,6 +37,10 @@ class AnthropicService
 
         if ($system !== null) {
             $payload['system'] = $system;
+        }
+
+        if ($temperature !== null) {
+            $payload['temperature'] = $temperature;
         }
 
         $response = Http::withHeaders([
@@ -62,11 +66,12 @@ class AnthropicService
      * @throws ConnectionException
      * @throws RequestException
      */
-    public function ask(string $prompt, ?string $system = null): string
+    public function ask(string $prompt, ?string $system = null, ?float $temperature = null): string
     {
         $result = $this->sendMessage(
             messages: [['role' => 'user', 'content' => $prompt]],
             system: $system,
+            temperature: $temperature,
         );
 
         return $result['content'];

@@ -3,6 +3,7 @@
 namespace Database\Factories;
 
 use App\Models\DiagnosisQuestion;
+use App\Models\DiagnosisSession;
 use Illuminate\Database\Eloquent\Factories\Factory;
 
 /**
@@ -19,16 +20,33 @@ class DiagnosisQuestionFactory extends Factory
     {
         return [
             'diagnosis_session_id' => DiagnosisSession::factory(),
+            'step' => 'describe',
+            'question_key' => 'd1',
+            'type' => 'single',
             'question' => fake()->sentence().'?',
+            'intro_text' => null,
+            'options' => [
+                ['id' => 'a', 'label' => fake()->sentence()],
+                ['id' => 'b', 'label' => fake()->sentence()],
+                ['id' => 'c', 'label' => fake()->sentence()],
+                ['id' => 'other', 'label' => 'My situation is different'],
+            ],
             'answer' => null,
-            'sort_order' => fake()->numberBetween(0, 10),
+            'sort_order' => 0,
         ];
     }
 
     public function answered(): static
     {
         return $this->state(fn (): array => [
-            'answer' => fake()->sentence(),
+            'answer' => ['selected' => ['a'], 'other_text' => null],
+        ]);
+    }
+
+    public function multiSelect(): static
+    {
+        return $this->state(fn (): array => [
+            'type' => 'multi',
         ]);
     }
 }
