@@ -20,17 +20,8 @@ class DiagnosisQuestionFactory extends Factory
     {
         return [
             'diagnosis_session_id' => DiagnosisSession::factory(),
-            'step' => 'describe',
-            'question_key' => 'd1',
-            'type' => 'single',
+            'step' => 'who',
             'question' => fake()->sentence().'?',
-            'intro_text' => null,
-            'options' => [
-                ['id' => 'a', 'label' => fake()->sentence()],
-                ['id' => 'b', 'label' => fake()->sentence()],
-                ['id' => 'c', 'label' => fake()->sentence()],
-                ['id' => 'other', 'label' => 'My situation is different'],
-            ],
             'answer' => null,
             'sort_order' => 0,
         ];
@@ -39,14 +30,7 @@ class DiagnosisQuestionFactory extends Factory
     public function answered(): static
     {
         return $this->state(fn (): array => [
-            'answer' => ['selected' => ['a'], 'other_text' => null],
-        ]);
-    }
-
-    public function multiSelect(): static
-    {
-        return $this->state(fn (): array => [
-            'type' => 'multi',
+            'answer' => fake()->paragraph(),
         ]);
     }
 }

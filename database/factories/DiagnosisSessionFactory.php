@@ -34,20 +34,6 @@ class DiagnosisSessionFactory extends Factory
         ]);
     }
 
-    /**
-     * @param  array{describe?: string, decide?: string, value?: string}  $routing
-     */
-    public function withRouting(array $routing = []): static
-    {
-        $defaults = ['describe' => 'deep', 'decide' => 'deep', 'value' => 'deep'];
-
-        return $this->diagnosed()->state(fn (array $attributes): array => [
-            'diagnosis' => array_merge($attributes['diagnosis'] ?? self::diagnosisData(), [
-                'routing' => array_merge($defaults, $routing),
-            ]),
-        ]);
-    }
-
     public function completed(): static
     {
         return $this->diagnosed()->state(fn (): array => [
@@ -77,11 +63,6 @@ class DiagnosisSessionFactory extends Factory
             'strengths' => [
                 ['area' => 'experience', 'feedback' => 'Shows practical knowledge.'],
             ],
-            'routing' => [
-                'describe' => 'deep',
-                'decide' => 'light',
-                'value' => 'deep',
-            ],
             'coach_message' => 'You\'ve got a solid foundation. Let\'s sharpen it.',
         ];
     }
@@ -105,6 +86,11 @@ class DiagnosisSessionFactory extends Factory
             'target_audience' => 'Freelancers and consultants who struggle to articulate what they do when a potential client asks.',
             'boundaries' => ['I don\'t build websites', 'I don\'t do ongoing marketing'],
             'one_liner' => 'I help freelancers explain what they do so clients actually hire them.',
+            'next_steps' => [
+                'Update your website homepage with the new service description.',
+                'Test your new one-liner on 3 potential clients this week.',
+                'Remove any services from your portfolio that don\'t match your new focus.',
+            ],
             'coach_message' => 'Great improvement! Your description went from confusing to compelling.',
             'variants' => null,
         ];

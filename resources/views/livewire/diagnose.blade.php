@@ -1,7 +1,14 @@
 @php
-    $progressLabels = ['Scan', 'Who', 'What', 'Why', 'Result'];
+    $progressLabels = ['Scan', 'Who?', 'What?', 'Why?', 'Recap'];
     $progressMap = [1 => 0, 2 => 0, 3 => 1, 4 => 2, 5 => 3, 6 => 4];
     $activeSegment = $progressMap[$step] ?? 0;
+
+    $stepThemeLabel = match ($questionStep ?? 'who') {
+        'who' => 'Who is your best client?',
+        'what' => 'What do you do?',
+        'why' => 'Why should they choose you?',
+        default => '',
+    };
 
     $scoreColor = function (int $score): string {
         return match (true) {
@@ -32,8 +39,8 @@
         <div class="flex w-full gap-2">
             @foreach ($progressLabels as $i => $label)
                 <div class="flex-1">
-                    <div class="mb-1.5 h-1.5 rounded-full {{ $i <= $activeSegment ? 'bg-blue-600' : 'bg-zinc-200 dark:bg-zinc-700' }}"></div>
-                    <span class="block text-center text-xs {{ $i <= $activeSegment ? 'font-medium text-blue-600 dark:text-blue-400' : 'text-zinc-400 dark:text-zinc-500' }}">{{ $label }}</span>
+                    <div class="mb-1.5 h-1.5 rounded-full {{ $i <= $activeSegment ? 'bg-green-600' : 'bg-zinc-200 dark:bg-zinc-700' }}"></div>
+                    <span class="block text-center text-xs {{ $i <= $activeSegment ? 'font-medium text-green-600 dark:text-green-400' : 'text-zinc-400 dark:text-zinc-500' }}">{{ $label }}</span>
                 </div>
             @endforeach
         </div>
@@ -134,7 +141,7 @@
                                 <flux:badge color="red" size="sm" class="mr-1">{{ $w['category'] ?? '' }}</flux:badge>
                                 <strong>{{ $w['issue'] ?? '' }}</strong>
                                 @if (! empty($w['explanation']))
-                                    <span class="block mt-0.5 text-red-600 dark:text-red-400">{{ $w['explanation'] }}</span>
+                                    <span class="mt-0.5 block text-red-600 dark:text-red-400">{{ $w['explanation'] }}</span>
                                 @endif
                             </li>
                         @endforeach
@@ -154,9 +161,9 @@
             </div>
 
             {{-- Continue button --}}
-            <flux:button variant="primary" wire:click="proceedFromDiagnosis" class="w-full!" wire:loading.attr="disabled">
-                <span wire:loading.remove wire:target="proceedFromDiagnosis">Let's improve it →</span>
-                <span wire:loading wire:target="proceedFromDiagnosis">
+            <flux:button variant="primary" wire:click="proceedToQuestions" class="w-full!" wire:loading.attr="disabled">
+                <span wire:loading.remove wire:target="proceedToQuestions">Let's improve it →</span>
+                <span wire:loading wire:target="proceedToQuestions">
                     <flux:icon.loading class="mr-2 size-4" />
                     Preparing your questions...
                 </span>
@@ -164,78 +171,54 @@
         </div>
 
     {{-- ══════════════════════════════════════════════════ --}}
-    {{-- STEPS 3/4/5: Question Wizard (describe/decide/value) --}}
+    {{-- STEPS 3/4/5: Who? / What? / Why? questions        --}}
     {{-- ══════════════════════════════════════════════════ --}}
     @elseif (in_array($step, [3, 4, 5]) && $this->session)
         @php
-            $stepNames = [3 => 'describe', 4 => 'decide', 5 => 'value'];
-            $stepName = $stepNames[$step];
-            $questions = $this->session->questions->where('step', $stepName)->values();
-            $currentQuestion = $questions->get($currentQuestionIndex);
-            $totalQuestions = $questions->count();
+            $stepQuestions = $this->session->questions->where('step', $questionStep);
+            $currentQuestion = $stepQuestions->whereNull('answer')->first();
+            $answeredOnStep = $stepQuestions->filter(fn ($q) => $q->answer !== null)->count();
         @endphp
         <div class="w-full">
-            {{-- Question counter + sub-progress --}}
+            {{-- Step theme --}}
             <div class="mb-2 text-center">
+                <flux:heading size="lg" class="mb-1">{{ $stepThemeLabel }}</flux:heading>
                 <flux:text class="text-sm text-zinc-500 dark:text-zinc-400">
-                    Question {{ $currentQuestionIndex + 1 }} of {{ $totalQuestions }}
+                    Step {{ array_search($questionStep, ['who', 'what', 'why']) + 1 }} of 3
+                    @if ($answeredOnStep > 0) — follow-up @endif
                 </flux:text>
             </div>
 
-            <div class="mb-6 flex w-full gap-1">
-                @for ($i = 0; $i < $totalQuestions; $i++)
-                    <div class="h-1 flex-1 rounded-full {{ $i < $currentQuestionIndex ? 'bg-blue-600' : ($i === $currentQuestionIndex ? 'bg-blue-400' : 'bg-zinc-200 dark:bg-zinc-700') }}"></div>
-                @endfor
+            {{-- 3-step sub-progress --}}
+            <div class="mb-6 flex w-full gap-1.5">
+                @foreach (['who', 'what', 'why'] as $s)
+                    @php
+                        $sQuestions = $this->session->questions->where('step', $s);
+                        $allAnswered = $sQuestions->count() > 0 && $sQuestions->every(fn ($q) => $q->answer !== null);
+                    @endphp
+                    <div class="h-1 flex-1 rounded-full {{ $allAnswered ? 'bg-green-600' : ($s === $questionStep ? 'bg-green-400' : 'bg-zinc-200 dark:bg-zinc-700') }}"></div>
+                @endforeach
             </div>
 
             @if ($currentQuestion)
-                {{-- Intro text --}}
-                @if ($currentQuestion->intro_text)
-                    <div class="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-300">
-                        {{ $currentQuestion->intro_text }}
-                    </div>
-                @endif
+                <div class="mb-6 rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800">
+                    <flux:text class="text-base leading-relaxed text-zinc-800 dark:text-zinc-200">
+                        {{ $currentQuestion->question }}
+                    </flux:text>
+                </div>
 
-                <flux:heading size="lg" class="mb-6 text-center">{{ $currentQuestion->question }}</flux:heading>
-
-                <form wire:submit="submitQuestionAnswer" class="space-y-6">
-                    @if ($currentQuestion->type === 'multi')
-                        {{-- Multi-select: checkboxes --}}
-                        <flux:checkbox.group wire:model="selectedOptions" class="flex-col">
-                            @foreach ($currentQuestion->options as $opt)
-                                <flux:checkbox value="{{ $opt['id'] }}" :label="$opt['label']" />
-                            @endforeach
-                        </flux:checkbox.group>
-                        <flux:error name="selectedOptions" />
-
-                        {{-- Other text input for multi --}}
-                        @if (collect($currentQuestion->options)->contains('id', 'other') && in_array('other', $selectedOptions))
-                            <flux:input wire:model="otherText" placeholder="Describe your situation..." />
-                        @endif
-                    @else
-                        {{-- Single-select: radio cards --}}
-                        <flux:radio.group wire:model="selectedOption" variant="cards" class="flex-col">
-                            @foreach ($currentQuestion->options as $opt)
-                                <flux:radio value="{{ $opt['id'] }}" :label="$opt['label']" />
-                            @endforeach
-                        </flux:radio.group>
-                        <flux:error name="selectedOption" />
-
-                        {{-- Other text input for single --}}
-                        @if (collect($currentQuestion->options)->contains('id', 'other') && $selectedOption === 'other')
-                            <flux:input wire:model="otherText" placeholder="Describe your situation..." />
-                        @endif
-                    @endif
+                <form wire:submit="submitAnswer" class="space-y-6">
+                    <flux:textarea
+                        wire:model="currentAnswer"
+                        placeholder="Type your answer here..."
+                        rows="4"
+                        resize="vertical"
+                    />
+                    <flux:error name="currentAnswer" />
 
                     <flux:button variant="primary" type="submit" class="w-full!" wire:loading.attr="disabled">
-                        <span wire:loading.remove wire:target="submitQuestionAnswer">
-                            @if ($currentQuestionIndex + 1 < $totalQuestions)
-                                Next →
-                            @else
-                                Continue →
-                            @endif
-                        </span>
-                        <span wire:loading wire:target="submitQuestionAnswer">
+                        <span wire:loading.remove wire:target="submitAnswer">Next →</span>
+                        <span wire:loading wire:target="submitAnswer">
                             <flux:icon.loading class="mr-2 size-4" />
                             Processing...
                         </span>
@@ -252,24 +235,15 @@
             $result = $this->session->final_result;
             $oldDiag = $this->session->diagnosis;
             $oldScore = $oldDiag['clarity_score'] ?? 0;
-            $newScore = $result['new_clarity_score'] ?? 0;
-            $improvement = $oldScore > 0 ? round((($newScore - $oldScore) / $oldScore) * 100) : 0;
         @endphp
         <div class="w-full">
             {{-- Header --}}
             <div class="mb-6 flex items-center justify-between">
                 <flux:heading size="lg">Your new service description</flux:heading>
-                <flux:badge color="green" size="sm">STEP 5: DONE</flux:badge>
+                <flux:badge color="green" size="sm">DONE</flux:badge>
             </div>
 
-            {{-- Progress bar (all green) --}}
-            <div class="mb-8 flex gap-1.5">
-                @for ($i = 0; $i < 5; $i++)
-                    <div class="h-1.5 flex-1 rounded-full bg-green-500"></div>
-                @endfor
-            </div>
-
-            {{-- Score circles + improvement text --}}
+            {{-- Score transformation --}}
             <div class="mb-8 flex items-center gap-5">
                 {{-- Before circle --}}
                 <div class="flex flex-col items-center">
@@ -281,21 +255,21 @@
 
                 <flux:icon.arrow-right class="size-5 text-zinc-400" />
 
-                {{-- After circle --}}
+                {{-- Client-Ready badge --}}
                 <div class="flex flex-col items-center">
-                    <div class="flex size-16 items-center justify-center rounded-full border-4 border-green-500">
-                        <span class="text-2xl font-bold text-green-600">{{ $newScore }}</span>
+                    <div class="flex size-16 items-center justify-center rounded-full border-4 border-green-500 bg-green-50 dark:bg-green-950">
+                        <flux:icon.check class="size-8 text-green-600" />
                     </div>
-                    <span class="mt-1 text-xs text-zinc-500">after</span>
+                    <span class="mt-1 text-xs font-medium text-green-600">client-ready</span>
                 </div>
 
-                {{-- Improvement text --}}
+                {{-- Transformation text --}}
                 <div class="ml-2">
                     <div class="text-lg font-bold text-zinc-900 dark:text-zinc-100">
-                        Clarity improved by {{ $improvement }}%
+                        Transformed from {{ $oldScore }}/10 to client-ready
                     </div>
                     <flux:text class="text-sm text-zinc-500">
-                        {{ $newScore >= 8 ? 'Your service description is now clear and client-ready.' : 'Your service description has improved significantly.' }}
+                        Your service description is now clear, specific, and ready to attract clients.
                     </flux:text>
                 </div>
             </div>
@@ -353,15 +327,15 @@
                 @endif
             </div>
 
-            {{-- Boundaries --}}
-            @if (! empty($result['boundaries']))
+            {{-- Next steps --}}
+            @if (! empty($result['next_steps']))
                 <div class="mb-6 rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800">
-                    <flux:text class="mb-3 text-xs font-bold uppercase tracking-widest text-zinc-400">Boundaries</flux:text>
+                    <flux:text class="mb-3 text-xs font-bold uppercase tracking-widest text-zinc-400">Next steps</flux:text>
                     <ul class="space-y-2">
-                        @foreach ($result['boundaries'] as $boundary)
-                            <li class="flex items-start gap-2 text-sm text-zinc-700 dark:text-zinc-300">
-                                <flux:icon.x-mark class="mt-0.5 size-4 shrink-0 text-red-500" />
-                                {{ $boundary }}
+                        @foreach ($result['next_steps'] as $i => $nextStep)
+                            <li class="flex items-start gap-3 text-sm text-zinc-700 dark:text-zinc-300">
+                                <span class="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-bold text-green-700 dark:bg-green-900 dark:text-green-300">{{ $i + 1 }}</span>
+                                {{ $nextStep }}
                             </li>
                         @endforeach
                     </ul>
@@ -380,8 +354,7 @@
                 $clipboardText = ($result['service_description'] ?? '') . "\n\n" .
                     'One-liner: ' . ($result['one_liner'] ?? '') . "\n" .
                     'Target audience: ' . ($result['target_audience'] ?? '') . "\n" .
-                    'Value proposition: ' . ($result['value_proposition'] ?? '') . "\n" .
-                    'Boundaries: ' . implode(', ', $result['boundaries'] ?? []);
+                    'Value proposition: ' . ($result['value_proposition'] ?? '');
             @endphp
             <div x-data="{ copied: false }" class="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
                 <flux:button

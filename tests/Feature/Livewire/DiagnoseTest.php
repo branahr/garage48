@@ -28,72 +28,37 @@ function fakeAnthropicHttp(string $json): void
     ]);
 }
 
-function fakeDescribeQuestionsResponse(): array
+function fakeAnthropicSequence(array $jsonResponses): void
+{
+    $responses = array_map(fn (string $json) => Http::response([
+        'role' => 'assistant',
+        'content' => [['type' => 'text', 'text' => $json]],
+        'usage' => ['input_tokens' => 100, 'output_tokens' => 50],
+    ]), $jsonResponses);
+
+    Http::fake([
+        'api.anthropic.com/*' => Http::sequence($responses),
+    ]);
+}
+
+function fakeQuestionsResponse(): array
 {
     return [
-        'step' => 'describe',
-        'questions' => [
-            [
-                'id' => 'd1',
-                'type' => 'single',
-                'question' => 'What was happening before they came to you?',
-                'options' => [
-                    ['id' => 'a', 'label' => 'They lost a client due to unclear pitch'],
-                    ['id' => 'b', 'label' => 'They were launching a new service'],
-                    ['id' => 'c', 'label' => 'They got negative feedback on clarity'],
-                    ['id' => 'other', 'label' => 'My situation is different'],
-                ],
-            ],
-        ],
+        'who' => 'Think about your best client — what was happening right before they contacted you?',
+        'what_do' => 'What is the ONE core thing you actually do for your clients?',
+        'what_dont' => 'What do clients sometimes ask for that you always say no to?',
+        'why' => 'What changes for your client after working with you?',
     ];
 }
 
-function fakeDecideQuestionsResponse(): array
+function fakeNoFollowupResponse(): array
 {
-    return [
-        'step' => 'decide',
-        'questions' => [
-            [
-                'id' => 'c1',
-                'type' => 'single',
-                'question' => 'What is the ONE core problem you solve?',
-                'options' => [
-                    ['id' => 'a', 'label' => 'Unclear messaging'],
-                    ['id' => 'b', 'label' => 'No defined audience'],
-                    ['id' => 'other', 'label' => 'Something else'],
-                ],
-            ],
-            [
-                'id' => 'c3',
-                'type' => 'multi',
-                'question' => 'What does your service NOT do?',
-                'options' => [
-                    ['id' => 'a', 'label' => "I don't build websites"],
-                    ['id' => 'b', 'label' => "I don't do ongoing marketing"],
-                    ['id' => 'c', 'label' => "I don't write code"],
-                ],
-            ],
-        ],
-    ];
+    return ['needs_followup' => false, 'followup_question' => null];
 }
 
-function fakeValueQuestionsResponse(): array
+function fakeFollowupResponse(): array
 {
-    return [
-        'step' => 'value',
-        'questions' => [
-            [
-                'id' => 'v1',
-                'type' => 'single',
-                'question' => "What's different in your client's life after?",
-                'options' => [
-                    ['id' => 'a', 'label' => 'They can explain their service in one sentence'],
-                    ['id' => 'b', 'label' => 'They stop losing clients to confusion'],
-                    ['id' => 'other', 'label' => 'Something else'],
-                ],
-            ],
-        ],
-    ];
+    return ['needs_followup' => true, 'followup_question' => 'Can you give a specific example?'];
 }
 
 // ── Page rendering ──
@@ -150,165 +115,178 @@ it('step 2: displays coach message and collapsible original text', function () {
         ->assertSee('View my original description');
 });
 
-// ── Step 2 → 3: Proceed with routing ──
+// ── Step 2 → 3: Proceed to questions ──
 
-it('step 2: proceedFromDiagnosis generates describe questions when routing is deep', function () {
-    fakeAnthropicHttp(json_encode(fakeDescribeQuestionsResponse()));
+it('step 2: proceedToQuestions creates tagged questions and moves to step 3', function () {
+    fakeAnthropicHttp(json_encode(fakeQuestionsResponse()));
 
-    $session = DiagnosisSession::factory()->withRouting(['describe' => 'deep'])->create();
+    $session = DiagnosisSession::factory()->diagnosed()->create();
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 2)
-        ->call('proceedFromDiagnosis')
+        ->call('proceedToQuestions')
         ->assertSet('step', 3)
-        ->assertSet('currentQuestionIndex', 0)
-        ->assertSee('What was happening before they came to you?');
+        ->assertSet('questionStep', 'who')
+        ->assertSee('best client');
 
-    expect($session->fresh()->questions->where('step', 'describe'))->toHaveCount(1);
+    $session->refresh();
+    expect($session->questions)->toHaveCount(4);
+    expect($session->questions->where('step', 'who')->count())->toBe(1);
+    expect($session->questions->where('step', 'what')->count())->toBe(2);
+    expect($session->questions->where('step', 'why')->count())->toBe(1);
 });
 
-it('step 2: skips describe and goes to decide when describe routing is skip', function () {
-    // First call returns decide questions
-    fakeAnthropicHttp(json_encode(fakeDecideQuestionsResponse()));
+// ── Steps 3/4/5: Who / What / Why Q&A ──
 
-    $session = DiagnosisSession::factory()->withRouting([
-        'describe' => 'skip',
-        'decide' => 'deep',
-    ])->create();
-
-    // Override dimension scores to match skip routing for describe
-    $diagnosis = $session->diagnosis;
-    $diagnosis['dimension_scores']['audience']['score'] = 2;
-    $session->update(['diagnosis' => $diagnosis]);
+it('step 3: requires an answer before advancing', function () {
+    $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
+    $session->questions()->create(['step' => 'who', 'question' => 'Who do you serve?', 'sort_order' => 0]);
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
-        ->set('step', 2)
-        ->call('proceedFromDiagnosis')
-        ->assertSet('step', 4);
-
-    expect($session->fresh()->questions->where('step', 'decide'))->toHaveCount(2);
+        ->set('step', 3)
+        ->set('questionStep', 'who')
+        ->set('currentAnswer', '')
+        ->call('submitAnswer')
+        ->assertHasErrors(['currentAnswer' => 'required']);
 });
 
-// ── Step 3-5: Question answering ──
+it('step 3: answer with no follow-up advances to What step', function () {
+    fakeAnthropicHttp(json_encode(fakeNoFollowupResponse()));
 
-it('step 3: submits single-select answer and advances', function () {
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
-
     $session->questions()->createMany([
-        [
-            'step' => 'describe',
-            'question_key' => 'd1',
-            'type' => 'single',
-            'question' => 'What situation triggers the need?',
-            'options' => [
-                ['id' => 'a', 'label' => 'Lost a client'],
-                ['id' => 'b', 'label' => 'Launching new service'],
-            ],
-            'sort_order' => 0,
-        ],
-        [
-            'step' => 'describe',
-            'question_key' => 'd2',
-            'type' => 'single',
-            'question' => 'Who is the person?',
-            'options' => [['id' => 'a', 'label' => 'A freelancer']],
-            'sort_order' => 1,
-        ],
+        ['step' => 'who', 'question' => 'Who do you serve?', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 1],
+        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 2],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
     ]);
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 3)
-        ->set('currentQuestionIndex', 0)
-        ->set('selectedOption', 'a')
-        ->call('submitQuestionAnswer')
-        ->assertSet('currentQuestionIndex', 1)
-        ->assertSet('selectedOption', '');
+        ->set('questionStep', 'who')
+        ->set('currentAnswer', 'Freelancers who lost a client')
+        ->call('submitAnswer')
+        ->assertSet('step', 4)
+        ->assertSet('questionStep', 'what')
+        ->assertSet('currentAnswer', '');
 
-    expect($session->questions()->where('question_key', 'd1')->first()->answer)
-        ->toBe(['selected' => ['a'], 'other_text' => null]);
+    expect($session->questions()->where('step', 'who')->first()->answer)
+        ->toBe('Freelancers who lost a client');
 });
 
-it('step 3: stores other text when Other is selected', function () {
-    $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
-
-    $session->questions()->create([
-        'step' => 'describe',
-        'question_key' => 'd1',
-        'type' => 'single',
-        'question' => 'What situation?',
-        'options' => [
-            ['id' => 'a', 'label' => 'Option A'],
-            ['id' => 'other', 'label' => 'Other'],
-        ],
-        'sort_order' => 0,
-    ]);
-
-    // This will trigger advanceToNextQuestionStep since it's the last question.
-    // We need to fake HTTP for the next step generation too.
-    fakeAnthropicHttp(json_encode(fakeDecideQuestionsResponse()));
-
-    Livewire::test(Diagnose::class)
-        ->set('sessionId', $session->id)
-        ->set('step', 3)
-        ->set('currentQuestionIndex', 0)
-        ->set('selectedOption', 'other')
-        ->set('otherText', 'My custom situation')
-        ->call('submitQuestionAnswer');
-
-    expect($session->questions()->where('question_key', 'd1')->first()->answer)
-        ->toBe(['selected' => ['other'], 'other_text' => 'My custom situation']);
-});
-
-it('step 4: submits multi-select answer', function () {
+it('step 4: What step has two questions and advances after both answered', function () {
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 4]);
-
-    // Override scores so decide is deep but value is skip (so it goes to generate after decide)
-    $diagnosis = $session->diagnosis;
-    $diagnosis['dimension_scores']['value']['score'] = 2;
-    $session->update(['diagnosis' => $diagnosis]);
-
-    $session->questions()->create([
-        'step' => 'decide',
-        'question_key' => 'c3',
-        'type' => 'multi',
-        'question' => 'What does your service NOT do?',
-        'options' => [
-            ['id' => 'a', 'label' => "I don't build websites"],
-            ['id' => 'b', 'label' => "I don't do marketing"],
-        ],
-        'sort_order' => 0,
+    $session->questions()->createMany([
+        ['step' => 'who', 'question' => 'Who?', 'answer' => 'Freelancers', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 1],
+        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 2],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
     ]);
 
-    // After answering last question, it will try to advance (generate result)
-    fakeAnthropicHttp(json_encode(DiagnosisSessionFactory::finalResultData()));
-
-    Livewire::test(Diagnose::class)
+    // Answer first What question — should stay on What (second unanswered)
+    $component = Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 4)
-        ->set('currentQuestionIndex', 0)
-        ->set('selectedOptions', ['a', 'b'])
-        ->call('submitQuestionAnswer')
+        ->set('questionStep', 'what')
+        ->set('currentAnswer', 'I rewrite service descriptions')
+        ->call('submitAnswer')
+        ->assertSet('step', 4)
+        ->assertSet('questionStep', 'what');
+
+    // Answer second What question — should advance to Why
+    $component
+        ->set('currentAnswer', 'I don\'t build websites or do marketing')
+        ->call('submitAnswer')
+        ->assertSet('step', 5)
+        ->assertSet('questionStep', 'why');
+});
+
+it('step 3: vague answer triggers follow-up question on same step', function () {
+    fakeAnthropicHttp(json_encode(fakeFollowupResponse()));
+
+    $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
+    $session->questions()->createMany([
+        ['step' => 'who', 'question' => 'Who do you serve?', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 1],
+        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 2],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
+    ]);
+
+    Livewire::test(Diagnose::class)
+        ->set('sessionId', $session->id)
+        ->set('step', 3)
+        ->set('questionStep', 'who')
+        ->set('currentAnswer', 'Small businesses')
+        ->call('submitAnswer')
+        ->assertSet('step', 3)
+        ->assertSet('questionStep', 'who')
+        ->assertSee('Can you give a specific example?');
+
+    expect($session->fresh()->questions->where('step', 'who')->count())->toBe(2);
+});
+
+it('step 3: second answer on same step always advances', function () {
+    fakeAnthropicHttp(json_encode(fakeNoFollowupResponse()));
+
+    $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
+    $session->questions()->createMany([
+        ['step' => 'who', 'question' => 'Who do you serve?', 'answer' => 'Small businesses', 'sort_order' => 0],
+        ['step' => 'who', 'question' => 'Can you be more specific?', 'sort_order' => 1],
+        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 2],
+        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 3],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 4],
+    ]);
+
+    Livewire::test(Diagnose::class)
+        ->set('sessionId', $session->id)
+        ->set('step', 3)
+        ->set('questionStep', 'who')
+        ->set('currentAnswer', 'Yoga studios who just opened')
+        ->call('submitAnswer')
+        ->assertSet('step', 4)
+        ->assertSet('questionStep', 'what');
+});
+
+it('step 5: completing Why generates result and moves to step 6', function () {
+    fakeAnthropicSequence([
+        json_encode(fakeNoFollowupResponse()),
+        json_encode(DiagnosisSessionFactory::finalResultData()),
+    ]);
+
+    $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 5]);
+    $session->questions()->createMany([
+        ['step' => 'who', 'question' => 'Who?', 'answer' => 'Freelancers', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What do you do?', 'answer' => 'Rewrite descriptions', 'sort_order' => 1],
+        ['step' => 'what', 'question' => 'What don\'t you do?', 'answer' => 'No websites', 'sort_order' => 2],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
+    ]);
+
+    Livewire::test(Diagnose::class)
+        ->set('sessionId', $session->id)
+        ->set('step', 5)
+        ->set('questionStep', 'why')
+        ->set('currentAnswer', 'Clients get 3x more leads after working with me')
+        ->call('submitAnswer')
         ->assertSet('step', 6);
 
-    expect($session->questions()->where('question_key', 'c3')->first()->answer)
-        ->selected->toBe(['a', 'b']);
+    expect($session->fresh()->status)->toBe('completed');
+    expect($session->fresh()->final_result)->not->toBeNull();
 });
 
 // ── Step 6: Final result ──
 
-it('step 6: displays before/after score comparison', function () {
+it('step 6: displays before score and client-ready badge', function () {
     $session = DiagnosisSession::factory()->completed()->create();
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 6)
         ->assertSee('Before')
-        ->assertSee('After')
-        ->assertSee($session->diagnosis['clarity_score'])
-        ->assertSee($session->final_result['new_clarity_score']);
+        ->assertSee('client-ready')
+        ->assertSee($session->diagnosis['clarity_score']);
 });
 
 it('step 6: displays service description and one-liner', function () {
@@ -319,16 +297,6 @@ it('step 6: displays service description and one-liner', function () {
         ->set('step', 6)
         ->assertSee($session->final_result['service_description'])
         ->assertSee($session->final_result['one_liner']);
-});
-
-it('step 6: displays boundaries', function () {
-    $session = DiagnosisSession::factory()->completed()->create();
-
-    Livewire::test(Diagnose::class)
-        ->set('sessionId', $session->id)
-        ->set('step', 6)
-        ->assertSee("I don't build websites")
-        ->assertSee("I don't do ongoing marketing");
 });
 
 // ── Session handling ──
@@ -353,31 +321,4 @@ it('can start over and clear state', function () {
         ->assertSet('description', '')
         ->assertSet('sessionId', null)
         ->assertSet('step', 1);
-});
-
-// ── Routing logic ──
-
-it('skips all question steps and goes straight to generate when all routing is skip', function () {
-    $session = DiagnosisSession::factory()->create([
-        'diagnosis' => array_merge(DiagnosisSessionFactory::diagnosisData(), [
-            'dimension_scores' => [
-                'audience' => ['score' => 2, 'reason' => 'Good'],
-                'problem' => ['score' => 2, 'reason' => 'Good'],
-                'offer' => ['score' => 2, 'reason' => 'Good'],
-                'value' => ['score' => 2, 'reason' => 'Good'],
-                'language' => ['score' => 2, 'reason' => 'Good'],
-            ],
-        ]),
-        'step' => 2,
-    ]);
-
-    fakeAnthropicHttp(json_encode(DiagnosisSessionFactory::finalResultData()));
-
-    Livewire::test(Diagnose::class)
-        ->set('sessionId', $session->id)
-        ->set('step', 2)
-        ->call('proceedFromDiagnosis')
-        ->assertSet('step', 6);
-
-    expect($session->fresh()->status)->toBe('completed');
 });

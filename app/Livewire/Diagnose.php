@@ -18,18 +18,13 @@ class Diagnose extends Component
 
     public int $step = 1;
 
-    public int $currentQuestionIndex = 0;
+    public string $questionStep = 'who';
 
-    public string $selectedOption = '';
+    public string $currentAnswer = '';
 
-    /** @var array<int, string> */
-    public array $selectedOptions = [];
+    private const STEP_ORDER = ['who', 'what', 'why'];
 
-    public string $otherText = '';
-
-    private const STEP_NAMES = ['describe', 'decide', 'value'];
-
-    private const STEP_MAP = [3 => 'describe', 4 => 'decide', 5 => 'value'];
+    private const STEP_MAP = [3 => 'who', 4 => 'what', 5 => 'why'];
 
     public function mount(): void
     {
@@ -39,14 +34,7 @@ class Diagnose extends Component
             $this->sessionId = $session->id;
             $this->description = $session->service_description;
             $this->step = $session->step;
-
-            if (isset(self::STEP_MAP[$this->step])) {
-                $stepName = self::STEP_MAP[$this->step];
-                $this->currentQuestionIndex = $session->questions
-                    ->where('step', $stepName)
-                    ->filter(fn (DiagnosisQuestion $q): bool => $q->answer !== null)
-                    ->count();
-            }
+            $this->questionStep = self::STEP_MAP[$this->step] ?? 'who';
         }
     }
 
@@ -90,66 +78,122 @@ class Diagnose extends Component
     }
 
     /**
-     * Step 2 → 3/4/5/6: Check routing and proceed to the first non-skipped question step, or straight to generate.
+     * Step 2 → 3: Generate questions per step (who, what_do, what_dont, why) and move to Who.
      */
-    public function proceedFromDiagnosis(AnthropicService $anthropic): void
+    public function proceedToQuestions(AnthropicService $anthropic): void
     {
-        $this->advanceToNextQuestionStep(2, $anthropic);
+        $session = $this->session;
+
+        $response = $anthropic->ask(
+            prompt: $this->getQuestionsUserPrompt($session),
+            system: $this->getQuestionsSystemPrompt(),
+            temperature: 0.7,
+        );
+
+        $data = $this->extractJson($response);
+
+        $sortOrder = 0;
+
+        // Who: 1 question
+        if (! empty($data['who'])) {
+            $session->questions()->create([
+                'step' => 'who',
+                'question' => is_array($data['who']) ? $data['who']['question'] : $data['who'],
+                'sort_order' => $sortOrder++,
+            ]);
+        }
+
+        // What: 2 questions (do + don't)
+        if (! empty($data['what_do'])) {
+            $session->questions()->create([
+                'step' => 'what',
+                'question' => is_array($data['what_do']) ? $data['what_do']['question'] : $data['what_do'],
+                'sort_order' => $sortOrder++,
+            ]);
+        }
+
+        if (! empty($data['what_dont'])) {
+            $session->questions()->create([
+                'step' => 'what',
+                'question' => is_array($data['what_dont']) ? $data['what_dont']['question'] : $data['what_dont'],
+                'sort_order' => $sortOrder++,
+            ]);
+        }
+
+        // Why: 1 question
+        if (! empty($data['why'])) {
+            $session->questions()->create([
+                'step' => 'why',
+                'question' => is_array($data['why']) ? $data['why']['question'] : $data['why'],
+                'sort_order' => $sortOrder++,
+            ]);
+        }
+
+        $session->update(['step' => 3]);
+        $this->step = 3;
+        $this->questionStep = 'who';
+        unset($this->session);
     }
 
     /**
-     * Submit the current question answer and advance.
+     * Submit answer for the current question step.
      */
-    public function submitQuestionAnswer(AnthropicService $anthropic): void
+    public function submitAnswer(AnthropicService $anthropic): void
     {
+        $this->validate([
+            'currentAnswer' => ['required', 'string', 'min:2'],
+        ], [
+            'currentAnswer.required' => 'Please type your answer.',
+            'currentAnswer.min' => 'Please provide a bit more detail.',
+        ]);
+
         $session = $this->session;
-        $stepName = self::STEP_MAP[$this->step] ?? null;
-
-        if (! $stepName) {
-            return;
-        }
-
-        $questions = $session->questions->where('step', $stepName)->values();
-        $question = $questions->get($this->currentQuestionIndex);
+        $question = $this->currentQuestion($session);
 
         if (! $question) {
             return;
         }
 
-        if ($question->type === 'multi') {
-            $this->validate([
-                'selectedOptions' => ['required', 'array', 'min:1'],
-            ], ['selectedOptions.required' => 'Please select at least one option.']);
+        $question->update(['answer' => $this->currentAnswer]);
+        $this->currentAnswer = '';
 
-            $answer = [
-                'selected' => $this->selectedOptions,
-                'other_text' => in_array('other', $this->selectedOptions) ? $this->otherText : null,
-            ];
-        } else {
-            $this->validate([
-                'selectedOption' => ['required', 'string'],
-            ], ['selectedOption.required' => 'Please select an option.']);
+        // Refresh to get updated answers
+        unset($this->session);
+        $session = $this->session;
 
-            $answer = [
-                'selected' => [$this->selectedOption],
-                'other_text' => $this->selectedOption === 'other' ? $this->otherText : null,
-            ];
+        $stepQuestions = $session->questionsForStep($this->questionStep)->get();
+        $unanswered = $stepQuestions->filter(fn (DiagnosisQuestion $q): bool => $q->answer === null);
+        $answeredCount = $stepQuestions->count() - $unanswered->count();
+
+        // If there's still an unanswered question on this step, stay
+        if ($unanswered->isNotEmpty()) {
+            return;
         }
 
-        $question->update(['answer' => $answer]);
+        // All questions on step answered — check if follow-up needed (max 2 per step)
+        if ($answeredCount >= 2) {
+            $this->advanceToNextStep($session, $anthropic);
 
-        $this->resetQuestionState();
-        $this->currentQuestionIndex++;
+            return;
+        }
 
-        if ($this->currentQuestionIndex >= $questions->count()) {
-            $this->advanceToNextQuestionStep($this->step, $anthropic);
-        } else {
+        // Only 1 answer — evaluate if follow-up needed
+        $followUp = $this->evaluateAnswer($anthropic, $session, $question);
+
+        if ($followUp) {
+            $session->questions()->create([
+                'step' => $this->questionStep,
+                'question' => $followUp,
+                'sort_order' => $question->sort_order + 1,
+            ]);
             unset($this->session);
+        } else {
+            $this->advanceToNextStep($session, $anthropic);
         }
     }
 
     /**
-     * Step 5/6 → 6: Generate final service description using all context.
+     * Step 6: Generate final improved service description.
      */
     public function generateResult(AnthropicService $anthropic): void
     {
@@ -181,7 +225,7 @@ class Diagnose extends Component
 
     public function startOver(): void
     {
-        $this->reset(['description', 'sessionId', 'selectedOption', 'selectedOptions', 'otherText', 'currentQuestionIndex']);
+        $this->reset(['description', 'sessionId', 'currentAnswer', 'questionStep']);
         $this->step = 1;
         session()->forget('diagnosis_session_id');
     }
@@ -192,124 +236,67 @@ class Diagnose extends Component
             ->layout('layouts.guest');
     }
 
-    // ── Routing helpers ──
+    // ── Helpers ──
 
-    private function getRoutingForStep(string $stepName): string
+    private function currentQuestion(DiagnosisSession $session): ?DiagnosisQuestion
     {
-        $session = $this->session;
-
-        return $session->computedRouting()[$stepName] ?? 'deep';
+        return $session->questions
+            ->where('step', $this->questionStep)
+            ->whereNull('answer')
+            ->first();
     }
 
-    /**
-     * From the current step number, find the next non-skipped question step or go to generate.
-     */
-    private function advanceToNextQuestionStep(int $fromStep, AnthropicService $anthropic): void
+    private function advanceToNextStep(DiagnosisSession $session, AnthropicService $anthropic): void
     {
-        $stepOrder = [3 => 'describe', 4 => 'decide', 5 => 'value'];
-        $session = $this->session;
-
-        foreach ($stepOrder as $stepNum => $stepName) {
-            if ($stepNum <= $fromStep) {
-                continue;
-            }
-
-            $routing = $this->getRoutingForStep($stepName);
-
-            if ($routing === 'skip') {
-                continue;
-            }
-
-            $count = $this->generateStepQuestions($stepName, $anthropic);
-
-            if ($count === 0) {
-                continue; // AI returned no questions — skip this step
-            }
-
-            $session->update(['step' => $stepNum]);
-            $this->step = $stepNum;
-            $this->currentQuestionIndex = 0;
-            unset($this->session);
-
-            return;
-        }
-
-        // All question steps skipped or done — go to generate
-        $session->update(['step' => 6]);
-        $this->step = 6;
-        $this->generateResult($anthropic);
-    }
-
-    private function generateStepQuestions(string $stepName, AnthropicService $anthropic): int
-    {
-        $session = $this->session;
-
-        [$system, $user] = match ($stepName) {
-            'describe' => [$this->getDescribeSystemPrompt(), $this->getDescribeUserPrompt($session)],
-            'decide' => [$this->getDecideSystemPrompt(), $this->getDecideUserPrompt($session)],
-            'value' => [$this->getValueSystemPrompt(), $this->getValueUserPrompt($session)],
+        $next = match ($this->questionStep) {
+            'who' => 'what',
+            'what' => 'why',
+            'why' => null,
         };
 
-        $response = $anthropic->ask(prompt: $user, system: $system, temperature: 0.7);
-        $data = $this->extractJson($response);
-
-        $count = 0;
-
-        foreach ($data['questions'] ?? [] as $index => $q) {
-            $options = collect($q['options'] ?? [])->map(function (array|string $opt, int $i): array {
-                if (is_string($opt)) {
-                    return ['id' => chr(97 + $i), 'label' => $opt];
-                }
-
-                return [
-                    'id' => $opt['id'] ?? $opt['value'] ?? chr(97 + $i),
-                    'label' => $opt['label'] ?? $opt['text'] ?? (string) $opt['id'],
-                ];
-            })->values()->all();
-
-            $session->questions()->create([
-                'step' => $stepName,
-                'question_key' => $q['id'] ?? $stepName[0].$index,
-                'type' => $q['type'] ?? 'single',
-                'question' => $q['question'],
-                'intro_text' => $q['intro_text'] ?? null,
-                'options' => $options,
-                'sort_order' => $index,
-            ]);
-
-            $count++;
+        if ($next) {
+            $stepNum = array_flip(self::STEP_MAP)[$next];
+            $session->update(['step' => $stepNum]);
+            $this->step = $stepNum;
+            $this->questionStep = $next;
+            unset($this->session);
+        } else {
+            $this->generateResult($anthropic);
         }
-
-        return $count;
     }
 
-    private function resetQuestionState(): void
+    private function evaluateAnswer(AnthropicService $anthropic, DiagnosisSession $session, DiagnosisQuestion $question): ?string
     {
-        $this->selectedOption = '';
-        $this->selectedOptions = [];
-        $this->otherText = '';
+        $response = $anthropic->ask(
+            prompt: $this->getEvaluateUserPrompt($session, $question),
+            system: $this->getEvaluateSystemPrompt(),
+            temperature: 0.7,
+        );
+
+        $data = $this->extractJson($response);
+
+        if (! empty($data['needs_followup']) && ! empty($data['followup_question'])) {
+            return $data['followup_question'];
+        }
+
+        return null;
     }
 
     /**
-     * Extract JSON from AI response, handling markdown fences and embedded text.
-     *
      * @return array<string, mixed>
      */
     private function extractJson(string $response): array
     {
         $trimmed = trim($response);
 
-        // Strip markdown code fences
         $trimmed = preg_replace('/^```(?:json)?\s*/s', '', $trimmed);
         $trimmed = preg_replace('/\s*```$/s', '', $trimmed);
 
-        // Try direct parse first
         $result = json_decode($trimmed, true);
         if (is_array($result) && $result !== []) {
             return $result;
         }
 
-        // Try to find JSON object in the response
         if (preg_match('/\{[\s\S]*\}/s', $trimmed, $matches)) {
             $result = json_decode($matches[0], true);
             if (is_array($result) && $result !== []) {
@@ -318,46 +305,6 @@ class Diagnose extends Component
         }
 
         return [];
-    }
-
-    // ── Collected answers helpers ──
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function collectStepAnswers(DiagnosisSession $session, string $stepName): array
-    {
-        return $session->questions
-            ->where('step', $stepName)
-            ->mapWithKeys(function (DiagnosisQuestion $q): array {
-                $selected = $q->answer['selected'] ?? [];
-                $optionMap = collect($q->options)->keyBy('id');
-
-                $selectedLabels = collect($selected)->map(
-                    fn (string $id): string => $optionMap[$id]['label'] ?? $id
-                )->all();
-
-                return [
-                    $q->question_key => [
-                        'question' => $q->question,
-                        'selected' => $selectedLabels,
-                        'other_text' => $q->answer['other_text'] ?? null,
-                    ],
-                ];
-            })
-            ->all();
-    }
-
-    /**
-     * @return array<string>
-     */
-    private function collectWeaknessCategories(DiagnosisSession $session): array
-    {
-        return collect($session->diagnosis['weaknesses'] ?? [])
-            ->pluck('category')
-            ->filter()
-            ->values()
-            ->all();
     }
 
     // ── Prompt methods ──
@@ -376,17 +323,9 @@ CLIENT's perspective. Score 5 dimensions, each 0-2 points:
 4. VALUE (0=missing, 1=generic, 2=specific+differentiated)
 5. LANGUAGE (0=jargon, 1=some jargon, 2=clear+simple)
 
-Tag weaknesses with categories: AUDIENCE_MISSING, AUDIENCE_BROAD,
-SITUATION_MISSING, PROBLEM_MISSING, PROBLEM_VAGUE,
-TOO_MANY_SERVICES, NO_BOUNDARIES, VALUE_MISSING,
-VALUE_GENERIC, DIFFERENTIATION_MISSING
-
-Also identify strengths. Determine routing for next steps:
-  describe: deep|light|skip
-  decide: deep|light|skip
-  value: deep|light|skip
-
+Also identify strengths and weaknesses.
 Tone: Warm but direct. Quote the user's own words in feedback.
+IMPORTANT: Never use the term "ideal client". Always say "best client" instead.
 CRITICAL: Return ONLY valid JSON. No markdown.
 PROMPT;
     }
@@ -415,189 +354,127 @@ Return JSON:
   "strengths": [
     {"area": "...", "feedback": "<1 sentence positive>"}
   ],
-  "routing": {
-    "describe": "deep|light|skip",
-    "decide": "deep|light|skip",
-    "value": "deep|light|skip"
-  },
   "coach_message": "<2-3 sentences, warm+direct>"
 }
 PROMPT;
     }
 
-    private function getDescribeSystemPrompt(): string
+    private function getQuestionsSystemPrompt(): string
     {
         return <<<'PROMPT'
-You are a service design expert using SITUATION-FIRST methodology:
-- Ask about the CLIENT'S SITUATION first, not the client type
-- A situation = a specific moment/trigger that creates the need
-- The person is DEFINED by the situation
+You are a warm, curious service design coach helping a freelancer
+get clearer about their service. Ask open, friendly questions
+that invite them to think and share — not interrogate.
 
-Principle: 'When you lock the situation, you lock the service.
-The client range can even expand.'
+Generate exactly 4 questions, one per key:
 
-Rules for generating options:
-- Each option describes a MOMENT, not a demographic
-- Must be specific enough to visualize
-- Include emotional/practical consequence
-- Bad: 'Small businesses that need design' (persona)
-- Good: 'When a freelancer lost a client because they said
-  I didn't understand what you offer' (moment + consequence)
+WHO — Help them describe who they work best with.
+Ask about the kind of person or situation, not demographics.
+Example: "Who's your best client? Tell me a bit about them
+and what was going on when they reached out to you."
 
-Tone: Warm but direct coach.
-CRITICAL: Return ONLY valid JSON.
+WHAT_DO — Help them describe what they actually do.
+Keep it simple — what's the main thing?
+Example: "In plain words, what do you do for your clients?
+What would they say you helped them with?"
+
+WHAT_DONT — Help them clarify what's outside their scope.
+This sharpens the offer naturally.
+Example: "What's something people sometimes ask you for
+that you don't actually do?"
+
+WHY — Help them describe what changes for the client.
+Focus on results they can see or feel.
+Example: "After working with you, what's different for
+your client? What changes in their work or life?"
+
+RULES:
+- Each question: 1-2 sentences, warm and conversational
+- Never use "ideal client" — always say "best client"
+- Questions should feel like a friendly chat, not an exam
+- Reference weaknesses from the diagnosis to fill gaps
+CRITICAL: Return ONLY valid JSON. No markdown.
 PROMPT;
     }
 
-    private function getDescribeUserPrompt(DiagnosisSession $session): string
+    private function getQuestionsUserPrompt(DiagnosisSession $session): string
     {
         $diagnosis = json_encode($session->diagnosis);
-        $routing = $this->getRoutingForStep('describe');
 
         return <<<PROMPT
 Original description: \"\"\"{$session->service_description}\"\"\"
 Diagnosis: \"\"\"{$diagnosis}\"\"\"
-Routing: "{$routing}"
 
-If deep: generate 2 questions (situation + person).
-If light: generate 1 question (situation only).
+Help this freelancer get clearer about three things:
+- WHO they work best with (the kind of person or situation)
+- WHAT they do (their main service) and what they don't do
+- WHY clients value them (what changes after working together)
 
-Q1 (always): 'Think about your best client. What was happening
-in their life or work right BEFORE they came to you?'
-3 specific situation options + 'My situation is different'
-
-Q2 (deep only): 'Who is typically the person in that situation?
-Not a job title, but what kind of person and what stage.'
-3 person options + 'Someone else'
+Look at the diagnosis weaknesses. Generate 4 friendly questions
+that help them think about the areas that need the most clarity.
 
 Return JSON:
 {
-  "step": "describe",
-  "questions": [{
-    "id": "d1", "type": "single",
-    "question": "...",
-    "options": [
-      {"id": "a", "label": "..."},
-      {"id": "b", "label": "..."},
-      {"id": "c", "label": "..."},
-      {"id": "other", "label": "My situation is different"}
-    ]
-  }]
+  "who": "a warm question about who they work best with...",
+  "what_do": "a question about what they mainly do for clients...",
+  "what_dont": "a question about what falls outside their service...",
+  "why": "a question about what changes for clients after working together..."
 }
 PROMPT;
     }
 
-    private function getDecideSystemPrompt(): string
+    private function getEvaluateSystemPrompt(): string
     {
         return <<<'PROMPT'
-You are a service design and business strategy expert helping
-a freelancer make hard decisions about their service.
+You are a friendly service design coach reviewing a freelancer's
+answer. Decide if they've shared enough to work with, or if a
+gentle follow-up would help them get clearer.
 
-Expertise:
-- Service design: without boundaries, a service expands until
-  meaningless. Boundaries create TRUST.
-- Business: a service that solves ONE thing is sellable.
-- Psychology: people resist narrowing down because it feels like
-  losing income. Make it safe: 'This doesn't mean you stop doing
-  the others. It means you LEAD with one.'
+GOOD ENOUGH: The answer gives you something to work with —
+a type of person, a real service, or a tangible result.
+Example: "I help restaurant owners set up their online ordering"
+— this is clear and usable even if not hyper-specific.
 
-Generate multiple-choice questions that FORCE choices.
-Tone: Warm but direct coach.
-CRITICAL: Return ONLY valid JSON.
+TOO VAGUE: The answer is so broad it could mean anything.
+Example: "I help businesses grow" or "everyone" — there's
+nothing concrete to build on.
+
+IMPORTANT: Be generous. Most answers are good enough.
+Only ask a follow-up if the answer is truly empty or
+could apply to literally anyone. One useful detail is enough.
+
+If follow-up is needed, ask ONE warm question that helps them
+share a bit more. Keep it encouraging, not interrogating.
+
+Never use "ideal client" — always say "best client".
+CRITICAL: Return ONLY valid JSON. No markdown.
 PROMPT;
     }
 
-    private function getDecideUserPrompt(DiagnosisSession $session): string
+    private function getEvaluateUserPrompt(DiagnosisSession $session, DiagnosisQuestion $question): string
     {
-        $diagnosis = json_encode($session->diagnosis);
-        $describeAnswers = json_encode($this->collectStepAnswers($session, 'describe'));
-        $routing = $this->getRoutingForStep('decide');
-        $categories = implode(', ', $this->collectWeaknessCategories($session));
+        $stepLabel = match ($question->step) {
+            'who' => 'WHO — describing who they work best with',
+            'what' => 'WHAT — describing their service or what they don\'t do',
+            'why' => 'WHY — what changes for their clients',
+            default => 'getting clearer about their service',
+        };
 
         return <<<PROMPT
-Original: \"\"\"{$session->service_description}\"\"\"
-Diagnosis: \"\"\"{$diagnosis}\"\"\"
-Who they serve: \"\"\"{$describeAnswers}\"\"\"
-Routing: "{$routing}"
-Weakness categories: "{$categories}"
+A freelancer is getting clearer about their service.
+Step: {$stepLabel}
 
-ALWAYS generate:
-C1: 'What is the ONE core problem you solve for someone in
-that situation?' single-select, 3 options + Other.
+Question asked: "{$question->question}"
+Their answer: "{$question->answer}"
 
-ONLY IF TOO_MANY_SERVICES in categories:
-C2: 'You mentioned [services]. If a client could only know
-you for ONE, which?' single-select with user's own services.
-Add intro: 'This doesn't mean you stop doing the others.'
+Is there enough here to work with, or would one friendly
+follow-up help them share a bit more?
 
-ALWAYS generate:
-C3: 'What does your service NOT do? Pick all that apply.'
-multi-select, 4-6 boundary options phrased as 'I don't...'
-
-Return JSON: {"step": "decide", "questions": [{
-  "id": "c1", "type": "single|multi",
-  "question": "...", "intro_text": null|"...",
-  "options": [...]
-}]}
-PROMPT;
-    }
-
-    private function getValueSystemPrompt(): string
-    {
-        return <<<'PROMPT'
-You are a marketing and positioning expert with deep
-knowledge of behavioural psychology.
-
-Expertise:
-- Marketing: people buy transformations, not processes.
-  'After working with me, you can...' beats 'I offer a programme.'
-- Psychology: freelancers default to describing deliverables.
-  Redirect from features to outcomes.
-- Loss framing (Kahneman): 'Without this, you keep losing clients'
-  is 2x more powerful than 'With this, you gain clients.'
-
-Three real alternatives every client considers:
-1. Do it themselves (free, but hard)
-2. Use ChatGPT or AI (cheap, but generic)
-3. Hire someone else (comparable, different)
-
-Tone: Warm, make value discovery feel natural, not salesy.
-CRITICAL: Return ONLY valid JSON.
-PROMPT;
-    }
-
-    private function getValueUserPrompt(DiagnosisSession $session): string
-    {
-        $diagnosis = json_encode($session->diagnosis);
-        $describeAnswers = json_encode($this->collectStepAnswers($session, 'describe'));
-        $decideAnswers = json_encode($this->collectStepAnswers($session, 'decide'));
-        $routing = $this->getRoutingForStep('value');
-        $categories = implode(', ', $this->collectWeaknessCategories($session));
-
-        return <<<PROMPT
-Original: \"\"\"{$session->service_description}\"\"\"
-Diagnosis: \"\"\"{$diagnosis}\"\"\"
-Who they serve: \"\"\"{$describeAnswers}\"\"\"
-Decisions: \"\"\"{$decideAnswers}\"\"\"
-Routing: "{$routing}"
-Weakness categories: "{$categories}"
-
-ALWAYS generate:
-V1: 'After working with you, what's the main thing that's
-DIFFERENT in your client's life? Not what you delivered —
-what changed for THEM.' single-select, 3 OBSERVABLE outcomes.
-Options must be 'they can...' or 'they stop...' NOT abstracts.
-
-ALWAYS generate:
-V2: 'A client is comparing you to: doing it themselves,
-using ChatGPT, or hiring someone else. Why choose you?'
-single-select, 3 differentiators + Other.
-
-ONLY IF DIFFERENTIATION_MISSING in categories:
-V3: 'What happens if they DON'T use your service?'
-single-select, 3 consequences. Use loss framing.
-
-Return JSON: {"step": "value", "questions": [...]}
+Return JSON:
+{
+  "needs_followup": true|false,
+  "followup_question": "a warm follow-up to help them elaborate" or null
+}
 PROMPT;
     }
 
@@ -607,36 +484,40 @@ PROMPT;
 You are an expert copywriter combining service design,
 marketing, business strategy, and behavioural psychology.
 
-Your job: USE the user's answers to write a DRAMATICALLY
-BETTER service description than their original. The new
-description MUST score higher than the original on every
-dimension. The user answered specific questions — use those
-answers as the foundation for the new description.
+The freelancer has made 3 key DECISIONS during this session:
+1. WHO — they named their specific best client and situation
+2. WHAT — they committed to one core service AND drew a boundary
+3. WHY — they claimed a specific, observable outcome
+
+Your job: turn those decisions into a DRAMATICALLY BETTER
+service description. Every sentence should trace back to one
+of their answers. The new description should sound like the
+freelancer on their best day — clear, confident, specific.
 
 WRITING RULES (non-negotiable):
-1. FIRST PERSON — 'I help...' not 'This service provides...'
-2. SITUATION-ANCHORED — Reference the specific situation from their answers
-3. ONE CLEAR OFFER — Not a menu of services
-4. OUTCOME OVER PROCESS — Lead with what CHANGES
-5. BOUNDED — Mention what you don't do (use their boundary answers)
-6. CONCRETE — 'Can I picture this?' test for every sentence
+1. FIRST PERSON — "I help..." not "This service provides..."
+2. SITUATION-ANCHORED — Open with the specific moment/trigger
+   the client named in the WHO step
+3. ONE CLEAR OFFER — Exactly what they committed to in WHAT
+4. OUTCOME FIRST — Lead with the WHY (what changes)
+5. BOUNDED — Weave the "what I don't do" answers into the
+   description to sharpen the offer naturally
+6. CONCRETE — "Can I picture this?" test for every sentence
 7. SHORT — Description: 3-5 sentences. One-liner: <20 words.
 
 BANNED: holistic, synergistic, leverage, transformative,
 innovative, cutting-edge, game-changing, seamless, robust,
 dynamic, paradigm, actionable, empower, disrupt.
-BANNED PHRASES: 'meaningful experiences', 'tailored to
-your needs', 'creative solutions', 'passion for helping',
-'next level', 'unlock potential'.
+Also BANNED: "ideal client" — always say "best client" instead.
 
-TEST: If a phrase could appear on any competitor's website
-unchanged, rewrite it.
+NEXT STEPS: Generate 3 concrete, actionable next steps the user
+should take right now with their new service description. These
+should be practical actions like updating their website, testing
+the new pitch, or reaching out to a specific type of client.
 
 SCORING: Re-score all 5 dimensions (0-2 each).
 The new total score MUST be higher than the original.
-Typical improvement: original 3-4 → new 7-9.
 Each dimension should improve or stay the same, never decrease.
-If vague flags exist, generate 2 variant options for that area.
 
 CRITICAL: Return ONLY valid JSON. No markdown, no explanation.
 PROMPT;
@@ -646,13 +527,17 @@ PROMPT;
     {
         $oldScore = $session->diagnosis['clarity_score'] ?? 0;
         $diagnosis = json_encode($session->diagnosis, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-        $describeAnswers = json_encode($this->collectStepAnswers($session, 'describe'), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-        $decideAnswers = json_encode($this->collectStepAnswers($session, 'decide'), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-        $valueAnswers = json_encode($this->collectStepAnswers($session, 'value'), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
 
-        $categories = $this->collectWeaknessCategories($session);
-        $vague = collect($categories)->filter(fn (string $c): bool => str_contains($c, 'VAGUE') || str_contains($c, 'BROAD') || str_contains($c, 'GENERIC'));
-        $vagueFlags = $vague->isNotEmpty() ? $vague->implode(', ') : 'none';
+        $qaByStep = [];
+        foreach (self::STEP_ORDER as $stepName) {
+            $stepQuestions = $session->questions->where('step', $stepName);
+            $pairs = $stepQuestions->map(fn ($q): string => "Q: {$q->question}\nA: {$q->answer}")->implode("\n");
+            $qaByStep[strtoupper($stepName)] = $pairs;
+        }
+
+        $whoQA = $qaByStep['WHO'] ?? '';
+        $whatQA = $qaByStep['WHAT'] ?? '';
+        $whyQA = $qaByStep['WHY'] ?? '';
 
         return <<<PROMPT
 Write an IMPROVED service description using ALL the data below.
@@ -664,20 +549,18 @@ ORIGINAL DESCRIPTION:
 DIAGNOSIS (what was wrong):
 {$diagnosis}
 
-WHO (situation & audience answers):
-{$describeAnswers}
+WHO (best client & situation):
+{$whoQA}
 
-WHAT (core problem & boundaries answers):
-{$decideAnswers}
+WHAT (what they do AND what they don't do):
+{$whatQA}
 
-WHY (value & differentiation answers):
-{$valueAnswers}
+WHY (value & outcome):
+{$whyQA}
 
-VAGUE FLAGS TO FIX: {$vagueFlags}
-
-USE the selected answers above as raw material. Each answer
-contains the actual text the user chose — weave it into the
-new description.
+USE the answers above as raw material. Weave the user's own words
+into the new description. Use the "don't do" answers to sharpen
+the offer — work them into the description naturally.
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -689,11 +572,15 @@ Return ONLY this JSON (no markdown, no explanation):
     "value": {"score": <0-2>, "reason": "brief reason"},
     "language": {"score": <0-2>, "reason": "brief reason"}
   },
-  "service_description": "<3-5 sentences, first person>",
+  "service_description": "<3-5 sentences, first person, boundaries woven in>",
   "value_proposition": "<1-2 sentences>",
   "target_audience": "<1 sentence, situation-based>",
-  "boundaries": ["I don't...", "I don't..."],
   "one_liner": "<under 20 words>",
+  "next_steps": [
+    "concrete action step 1",
+    "concrete action step 2",
+    "concrete action step 3"
+  ],
   "coach_message": "<2-3 sentences celebrating the improvement>",
   "variants": null
 }

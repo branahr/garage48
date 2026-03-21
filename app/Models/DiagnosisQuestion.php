@@ -15,25 +15,10 @@ class DiagnosisQuestion extends Model
     protected $fillable = [
         'diagnosis_session_id',
         'step',
-        'question_key',
-        'type',
         'question',
-        'intro_text',
-        'options',
         'answer',
         'sort_order',
     ];
-
-    /**
-     * @return array<string, string>
-     */
-    protected function casts(): array
-    {
-        return [
-            'options' => 'array',
-            'answer' => 'array',
-        ];
-    }
 
     /**
      * @return BelongsTo<DiagnosisSession, $this>
