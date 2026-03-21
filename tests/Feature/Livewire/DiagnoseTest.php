@@ -4,6 +4,14 @@ use App\Livewire\Diagnose;
 use Illuminate\Support\Facades\Http;
 use Livewire\Livewire;
 
+beforeEach(function () {
+    config([
+        'services.anthropic.api_key' => 'test-key',
+        'services.anthropic.model' => 'claude-sonnet-4-20250514',
+        'services.anthropic.max_tokens' => 4096,
+    ]);
+});
+
 it('renders the diagnose page', function () {
     $this->get('/diagnose')->assertSuccessful();
 });
