@@ -253,94 +253,111 @@
             $oldDiag = $this->session->diagnosis;
             $oldScore = $oldDiag['clarity_score'] ?? 0;
             $newScore = $result['new_clarity_score'] ?? 0;
-            $oldDims = $oldDiag['dimension_scores'] ?? [];
-            $newDims = $result['new_dimension_scores'] ?? [];
-            $dimLabels = ['audience' => 'Audience', 'problem' => 'Problem', 'offer' => 'Offer', 'value' => 'Value', 'language' => 'Language'];
+            $improvement = $oldScore > 0 ? round((($newScore - $oldScore) / $oldScore) * 100) : 0;
         @endphp
         <div class="w-full">
-            {{-- Before/After Score --}}
-            <div class="mb-6 flex items-center justify-center gap-6">
-                <div class="text-center">
-                    <div class="text-4xl font-bold {{ $scoreColor($oldScore) }}">{{ $oldScore }}</div>
-                    <flux:text class="text-xs text-zinc-500">Before</flux:text>
-                </div>
-                <flux:icon.arrow-right class="size-6 text-zinc-400" />
-                <div class="text-center">
-                    <div class="text-5xl font-bold {{ $scoreColor($newScore) }}">{{ $newScore }}</div>
-                    <flux:text class="text-xs text-zinc-500">After</flux:text>
-                </div>
+            {{-- Header --}}
+            <div class="mb-6 flex items-center justify-between">
+                <flux:heading size="lg">Your new service description</flux:heading>
+                <flux:badge color="green" size="sm">STEP 5: DONE</flux:badge>
             </div>
 
-            {{-- Dimension comparison --}}
-            <div class="mb-6 space-y-2">
-                @foreach ($dimLabels as $key => $label)
-                    @php
-                        $oldS = $oldDims[$key]['score'] ?? 0;
-                        $newS = $newDims[$key]['score'] ?? 0;
-                    @endphp
-                    <div class="flex items-center gap-3 text-sm">
-                        <span class="w-20 shrink-0 font-medium text-zinc-700 dark:text-zinc-300">{{ $label }}</span>
-                        <span class="inline-block size-2.5 rounded-full {{ $dimColor($oldS) }}"></span>
-                        <span class="text-zinc-500">{{ $oldS }}</span>
-                        <span class="text-zinc-400">→</span>
-                        <span class="inline-block size-2.5 rounded-full {{ $dimColor($newS) }}"></span>
-                        <span class="font-semibold text-zinc-700 dark:text-zinc-300">{{ $newS }}</span>
+            {{-- Progress bar (all green) --}}
+            <div class="mb-8 flex gap-1.5">
+                @for ($i = 0; $i < 5; $i++)
+                    <div class="h-1.5 flex-1 rounded-full bg-green-500"></div>
+                @endfor
+            </div>
+
+            {{-- Score circles + improvement text --}}
+            <div class="mb-8 flex items-center gap-5">
+                {{-- Before circle --}}
+                <div class="flex flex-col items-center">
+                    <div class="flex size-16 items-center justify-center rounded-full border-4 border-red-500">
+                        <span class="text-2xl font-bold text-red-600">{{ $oldScore }}</span>
                     </div>
-                @endforeach
+                    <span class="mt-1 text-xs text-zinc-500">before</span>
+                </div>
+
+                <flux:icon.arrow-right class="size-5 text-zinc-400" />
+
+                {{-- After circle --}}
+                <div class="flex flex-col items-center">
+                    <div class="flex size-16 items-center justify-center rounded-full border-4 border-green-500">
+                        <span class="text-2xl font-bold text-green-600">{{ $newScore }}</span>
+                    </div>
+                    <span class="mt-1 text-xs text-zinc-500">after</span>
+                </div>
+
+                {{-- Improvement text --}}
+                <div class="ml-2">
+                    <div class="text-lg font-bold text-zinc-900 dark:text-zinc-100">
+                        Clarity improved by {{ $improvement }}%
+                    </div>
+                    <flux:text class="text-sm text-zinc-500">
+                        {{ $newScore >= 8 ? 'Your service description is now clear and client-ready.' : 'Your service description has improved significantly.' }}
+                    </flux:text>
+                </div>
             </div>
 
-            {{-- Coach message --}}
-            @if (! empty($result['coach_message']))
-                <div class="mb-6 rounded-xl border border-green-200 bg-green-50 p-4 text-sm leading-relaxed text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-300">
-                    {{ $result['coach_message'] }}
-                </div>
-            @endif
-
-            {{-- Service description --}}
-            @if (! empty($result['service_description']))
-                <div x-data="{ copied: false }" class="relative mb-4 rounded-xl border border-blue-200 bg-blue-50 p-6 dark:border-blue-800 dark:bg-blue-950">
-                    <flux:text class="text-lg leading-relaxed text-blue-900 dark:text-blue-100">
-                        {{ $result['service_description'] }}
+            {{-- Before / After comparison cards --}}
+            <div class="mb-8 grid gap-4 md:grid-cols-2">
+                {{-- Before card --}}
+                <div class="rounded-xl border border-red-200 bg-red-50 p-5 dark:border-red-900 dark:bg-red-950">
+                    <div class="mb-3 text-xs font-bold uppercase tracking-widest text-red-600 dark:text-red-400">Before</div>
+                    <flux:text class="text-sm leading-relaxed text-red-900 dark:text-red-200">
+                        {{ Str::limit($this->session->service_description, 200) }}
                     </flux:text>
-                    <button
-                        @click="navigator.clipboard.writeText(@js($result['service_description'])); copied = true; setTimeout(() => copied = false, 2000)"
-                        class="absolute right-3 top-3 rounded-md p-1.5 text-blue-400 hover:bg-blue-100 hover:text-blue-600 dark:hover:bg-blue-900"
-                    >
-                        <template x-if="!copied"><flux:icon.clipboard class="size-4" /></template>
-                        <template x-if="copied"><flux:icon.check class="size-4" /></template>
-                    </button>
                 </div>
-            @endif
+
+                {{-- After card --}}
+                @if (! empty($result['service_description']))
+                    <div x-data="{ copied: false }" class="relative rounded-xl border border-green-200 bg-green-50 p-5 dark:border-green-900 dark:bg-green-950">
+                        <div class="mb-3 text-xs font-bold uppercase tracking-widest text-green-600 dark:text-green-400">After</div>
+                        <flux:text class="text-sm leading-relaxed text-green-900 dark:text-green-200">
+                            {{ $result['service_description'] }}
+                        </flux:text>
+                        <button
+                            @click="navigator.clipboard.writeText(@js($result['service_description'])); copied = true; setTimeout(() => copied = false, 2000)"
+                            class="absolute right-3 top-3 rounded-md p-1.5 text-green-400 hover:bg-green-100 hover:text-green-600 dark:hover:bg-green-900"
+                        >
+                            <template x-if="!copied"><flux:icon.clipboard class="size-4" /></template>
+                            <template x-if="copied"><flux:icon.check class="size-4" /></template>
+                        </button>
+                    </div>
+                @endif
+            </div>
 
             {{-- One-liner --}}
             @if (! empty($result['one_liner']))
-                <div class="mb-6 rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
-                    <flux:text class="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-400">One-liner</flux:text>
+                <div class="mb-6 rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800">
+                    <flux:text class="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-400">One-liner</flux:text>
                     <flux:text class="text-base font-medium text-zinc-800 dark:text-zinc-200">{{ $result['one_liner'] }}</flux:text>
                 </div>
             @endif
 
-            <div class="grid gap-4 md:grid-cols-2">
+            {{-- Target audience + Value proposition --}}
+            <div class="mb-6 grid gap-4 md:grid-cols-2">
                 @if (! empty($result['target_audience']))
-                    <flux:callout>
-                        <flux:callout.heading>Target audience</flux:callout.heading>
-                        <flux:callout.text>{{ $result['target_audience'] }}</flux:callout.text>
-                    </flux:callout>
+                    <div class="rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800">
+                        <flux:text class="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-400">Target audience</flux:text>
+                        <flux:text class="text-sm text-zinc-700 dark:text-zinc-300">{{ $result['target_audience'] }}</flux:text>
+                    </div>
                 @endif
 
                 @if (! empty($result['value_proposition']))
-                    <flux:callout>
-                        <flux:callout.heading>Value proposition</flux:callout.heading>
-                        <flux:callout.text>{{ $result['value_proposition'] }}</flux:callout.text>
-                    </flux:callout>
+                    <div class="rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800">
+                        <flux:text class="mb-1 text-xs font-bold uppercase tracking-widest text-zinc-400">Value proposition</flux:text>
+                        <flux:text class="text-sm text-zinc-700 dark:text-zinc-300">{{ $result['value_proposition'] }}</flux:text>
+                    </div>
                 @endif
             </div>
 
             {{-- Boundaries --}}
             @if (! empty($result['boundaries']))
-                <div class="mt-4">
-                    <flux:heading size="sm" class="mb-2">Boundaries</flux:heading>
-                    <ul class="space-y-1.5">
+                <div class="mb-6 rounded-xl border border-zinc-200 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-800">
+                    <flux:text class="mb-3 text-xs font-bold uppercase tracking-widest text-zinc-400">Boundaries</flux:text>
+                    <ul class="space-y-2">
                         @foreach ($result['boundaries'] as $boundary)
                             <li class="flex items-start gap-2 text-sm text-zinc-700 dark:text-zinc-300">
                                 <flux:icon.x-mark class="mt-0.5 size-4 shrink-0 text-red-500" />
@@ -351,22 +368,41 @@
                 </div>
             @endif
 
-            {{-- Variants --}}
-            @if (! empty($result['variants']))
-                <div class="mt-6">
-                    <flux:heading size="sm" class="mb-2">Variants</flux:heading>
-                    <flux:text class="mb-3 text-sm text-zinc-500">{{ $result['variants']['message'] ?? 'We noticed some areas could go either way. Pick your preferred version:' }}</flux:text>
-                    <div class="grid gap-3 md:grid-cols-2">
-                        @foreach ($result['variants']['options'] ?? [] as $variant)
-                            <div class="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800">
-                                <flux:text class="text-sm font-medium">{{ $variant['label'] ?? $variant['id'] ?? '' }}</flux:text>
-                            </div>
-                        @endforeach
-                    </div>
+            {{-- Coach message --}}
+            @if (! empty($result['coach_message']))
+                <div class="mb-6 rounded-xl border border-green-200 bg-green-50 p-4 text-sm leading-relaxed text-green-800 dark:border-green-800 dark:bg-green-950 dark:text-green-300">
+                    {{ $result['coach_message'] }}
                 </div>
             @endif
 
-            <div class="mt-8 flex justify-center">
+            {{-- Action buttons --}}
+            @php
+                $clipboardText = ($result['service_description'] ?? '') . "\n\n" .
+                    'One-liner: ' . ($result['one_liner'] ?? '') . "\n" .
+                    'Target audience: ' . ($result['target_audience'] ?? '') . "\n" .
+                    'Value proposition: ' . ($result['value_proposition'] ?? '') . "\n" .
+                    'Boundaries: ' . implode(', ', $result['boundaries'] ?? []);
+            @endphp
+            <div x-data="{ copied: false }" class="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+                <flux:button
+                    variant="primary"
+                    icon="clipboard"
+                    @click="navigator.clipboard.writeText(@js($clipboardText)); copied = true; setTimeout(() => copied = false, 2000)"
+                >
+                    <span x-show="!copied">Copy to clipboard</span>
+                    <span x-show="copied" x-cloak>Copied!</span>
+                </flux:button>
+
+                <flux:button variant="filled" icon="envelope" onclick="alert('Email functionality coming soon!')">
+                    Send to email
+                </flux:button>
+
+                <flux:button variant="filled" icon="document-arrow-down" onclick="alert('PDF export coming soon!')">
+                    Export to PDF
+                </flux:button>
+            </div>
+
+            <div class="mt-4 flex justify-center">
                 <flux:button wire:click="startOver" variant="subtle">
                     ← Start over with a new service
                 </flux:button>
