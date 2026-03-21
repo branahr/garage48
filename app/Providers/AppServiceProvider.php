@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Services\AnthropicService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
@@ -15,7 +16,13 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->singleton(AnthropicService::class, function (): AnthropicService {
+            return new AnthropicService(
+                apiKey: config('services.anthropic.api_key'),
+                model: config('services.anthropic.model'),
+                maxTokens: config('services.anthropic.max_tokens'),
+            );
+        });
     }
 
     /**
