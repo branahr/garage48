@@ -84,6 +84,8 @@ class DiagnosisSessionFactory extends Factory
             'service_description' => 'I help early-stage SaaS founders who just lost a client because their pitch was unclear. I rewrite your service description so potential clients immediately understand what you do and why they should choose you.',
             'value_proposition' => 'After working with me, you can explain your service in one sentence that makes prospects say yes.',
             'target_audience' => 'Freelancers and consultants who struggle to articulate what they do when a potential client asks.',
+            'clear_problem' => 'Freelancers lose clients because their service description is confusing — buyers don\'t understand what they\'re paying for.',
+            'unfair_advantage' => 'I\'ve been a freelancer who couldn\'t explain my own service, so I know the actual fix — not theory.',
             'boundaries' => ['I don\'t build websites', 'I don\'t do ongoing marketing'],
             'one_liner' => 'I help freelancers explain what they do so clients actually hire them.',
             'next_steps' => [

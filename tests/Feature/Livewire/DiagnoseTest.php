@@ -41,16 +41,6 @@ function fakeAnthropicSequence(array $jsonResponses): void
     ]);
 }
 
-function fakeQuestionsResponse(): array
-{
-    return [
-        'who' => 'Think about your best client — what was happening right before they contacted you?',
-        'what_do' => 'What is the ONE core thing you actually do for your clients?',
-        'what_dont' => 'What do clients sometimes ask for that you always say no to?',
-        'why' => 'What changes for your client after working with you?',
-    ];
-}
-
 function fakeNoFollowupResponse(): array
 {
     return ['needs_followup' => false, 'followup_question' => null];
@@ -58,7 +48,7 @@ function fakeNoFollowupResponse(): array
 
 function fakeFollowupResponse(): array
 {
-    return ['needs_followup' => true, 'followup_question' => 'Can you give a specific example?'];
+    return ['needs_followup' => true, 'followup_question' => 'That\'s too vague. What specifically breaks? Give me a concrete consequence.'];
 }
 
 // ── Page rendering ──
@@ -117,9 +107,7 @@ it('step 2: displays coach message and collapsible original text', function () {
 
 // ── Step 2 → 3: Proceed to questions ──
 
-it('step 2: proceedToQuestions creates tagged questions and moves to step 3', function () {
-    fakeAnthropicHttp(json_encode(fakeQuestionsResponse()));
-
+it('step 2: proceedToQuestions creates 3 fixed questions and moves to step 3', function () {
     $session = DiagnosisSession::factory()->diagnosed()->create();
 
     Livewire::test(Diagnose::class)
@@ -128,12 +116,12 @@ it('step 2: proceedToQuestions creates tagged questions and moves to step 3', fu
         ->call('proceedToQuestions')
         ->assertSet('step', 3)
         ->assertSet('questionStep', 'who')
-        ->assertSee('best client');
+        ->assertSee('Who do you see as a customer');
 
     $session->refresh();
-    expect($session->questions)->toHaveCount(4);
+    expect($session->questions)->toHaveCount(3);
     expect($session->questions->where('step', 'who')->count())->toBe(1);
-    expect($session->questions->where('step', 'what')->count())->toBe(2);
+    expect($session->questions->where('step', 'what')->count())->toBe(1);
     expect($session->questions->where('step', 'why')->count())->toBe(1);
 });
 
@@ -141,7 +129,7 @@ it('step 2: proceedToQuestions creates tagged questions and moves to step 3', fu
 
 it('step 3: requires an answer before advancing', function () {
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
-    $session->questions()->create(['step' => 'who', 'question' => 'Who do you serve?', 'sort_order' => 0]);
+    $session->questions()->create(['step' => 'who', 'question' => 'Who do you see as a customer?', 'sort_order' => 0]);
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
@@ -157,48 +145,40 @@ it('step 3: answer with no follow-up advances to What step', function () {
 
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
     $session->questions()->createMany([
-        ['step' => 'who', 'question' => 'Who do you serve?', 'sort_order' => 0],
-        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 1],
-        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 2],
-        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
+        ['step' => 'who', 'question' => 'Who do you see as a customer?', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What will your service solve?', 'sort_order' => 1],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 2],
     ]);
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 3)
         ->set('questionStep', 'who')
-        ->set('currentAnswer', 'Freelancers who lost a client')
+        ->set('currentAnswer', 'Founders in their first 2 years who built something but can\'t explain it')
         ->call('submitAnswer')
         ->assertSet('step', 4)
         ->assertSet('questionStep', 'what')
         ->assertSet('currentAnswer', '');
 
     expect($session->questions()->where('step', 'who')->first()->answer)
-        ->toBe('Freelancers who lost a client');
+        ->toBe('Founders in their first 2 years who built something but can\'t explain it');
 });
 
-it('step 4: What step has two questions and advances after both answered', function () {
+it('step 4: What answer advances to Why step', function () {
+    fakeAnthropicHttp(json_encode(fakeNoFollowupResponse()));
+
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 4]);
     $session->questions()->createMany([
-        ['step' => 'who', 'question' => 'Who?', 'answer' => 'Freelancers', 'sort_order' => 0],
-        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 1],
-        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 2],
-        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
+        ['step' => 'who', 'question' => 'Who do you see as a customer?', 'answer' => 'Solo consultants', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What will your service solve?', 'sort_order' => 1],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 2],
     ]);
 
-    // Answer first What question — should stay on What (second unanswered)
-    $component = Livewire::test(Diagnose::class)
+    Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 4)
         ->set('questionStep', 'what')
-        ->set('currentAnswer', 'I rewrite service descriptions')
-        ->call('submitAnswer')
-        ->assertSet('step', 4)
-        ->assertSet('questionStep', 'what');
-
-    // Answer second What question — should advance to Why
-    $component
-        ->set('currentAnswer', 'I don\'t build websites or do marketing')
+        ->set('currentAnswer', 'They lose clients because their description confuses buyers')
         ->call('submitAnswer')
         ->assertSet('step', 5)
         ->assertSet('questionStep', 'why');
@@ -209,21 +189,20 @@ it('step 3: vague answer triggers follow-up question on same step', function () 
 
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
     $session->questions()->createMany([
-        ['step' => 'who', 'question' => 'Who do you serve?', 'sort_order' => 0],
-        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 1],
-        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 2],
-        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
+        ['step' => 'who', 'question' => 'Who do you see as a customer?', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What will your service solve?', 'sort_order' => 1],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 2],
     ]);
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 3)
         ->set('questionStep', 'who')
-        ->set('currentAnswer', 'Small businesses')
+        ->set('currentAnswer', 'I help them grow')
         ->call('submitAnswer')
         ->assertSet('step', 3)
         ->assertSet('questionStep', 'who')
-        ->assertSee('Can you give a specific example?');
+        ->assertSee('too vague');
 
     expect($session->fresh()->questions->where('step', 'who')->count())->toBe(2);
 });
@@ -233,18 +212,17 @@ it('step 3: second answer on same step always advances', function () {
 
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 3]);
     $session->questions()->createMany([
-        ['step' => 'who', 'question' => 'Who do you serve?', 'answer' => 'Small businesses', 'sort_order' => 0],
-        ['step' => 'who', 'question' => 'Can you be more specific?', 'sort_order' => 1],
-        ['step' => 'what', 'question' => 'What do you do?', 'sort_order' => 2],
-        ['step' => 'what', 'question' => 'What don\'t you do?', 'sort_order' => 3],
-        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 4],
+        ['step' => 'who', 'question' => 'Who do you see as a customer?', 'answer' => 'I help them grow', 'sort_order' => 0],
+        ['step' => 'who', 'question' => 'That\'s too vague. What breaks?', 'sort_order' => 1],
+        ['step' => 'what', 'question' => 'What will your service solve?', 'sort_order' => 2],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
     ]);
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 3)
         ->set('questionStep', 'who')
-        ->set('currentAnswer', 'Yoga studios who just opened')
+        ->set('currentAnswer', 'Founders in their first 2 years who can\'t explain their service')
         ->call('submitAnswer')
         ->assertSet('step', 4)
         ->assertSet('questionStep', 'what');
@@ -258,17 +236,16 @@ it('step 5: completing Why generates result and moves to step 6', function () {
 
     $session = DiagnosisSession::factory()->diagnosed()->create(['step' => 5]);
     $session->questions()->createMany([
-        ['step' => 'who', 'question' => 'Who?', 'answer' => 'Freelancers', 'sort_order' => 0],
-        ['step' => 'what', 'question' => 'What do you do?', 'answer' => 'Rewrite descriptions', 'sort_order' => 1],
-        ['step' => 'what', 'question' => 'What don\'t you do?', 'answer' => 'No websites', 'sort_order' => 2],
-        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 3],
+        ['step' => 'who', 'question' => 'Who do you see as a customer?', 'answer' => 'Solo consultants', 'sort_order' => 0],
+        ['step' => 'what', 'question' => 'What will your service solve?', 'answer' => 'They lose clients', 'sort_order' => 1],
+        ['step' => 'why', 'question' => 'Why you?', 'sort_order' => 2],
     ]);
 
     Livewire::test(Diagnose::class)
         ->set('sessionId', $session->id)
         ->set('step', 5)
         ->set('questionStep', 'why')
-        ->set('currentAnswer', 'Clients get 3x more leads after working with me')
+        ->set('currentAnswer', 'I\'ve been a freelancer who couldn\'t explain my own service')
         ->call('submitAnswer')
         ->assertSet('step', 6);
 

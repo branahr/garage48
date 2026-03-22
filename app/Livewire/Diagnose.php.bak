@@ -26,12 +26,6 @@ class Diagnose extends Component
 
     private const STEP_MAP = [3 => 'who', 4 => 'what', 5 => 'why'];
 
-    private const FIXED_QUESTIONS = [
-        'who' => 'Who do you see as a customer? (Who would have the need for using your service?)',
-        'what' => 'What will your service solve for customers?',
-        'why' => 'Why would they recommend you to someone else?',
-    ];
-
     public function mount(): void
     {
         $id = session('diagnosis_session_id');
@@ -84,17 +78,53 @@ class Diagnose extends Component
     }
 
     /**
-     * Step 2 → 3: Create the 3 fixed questions and move to Problem step.
+     * Step 2 → 3: Generate questions per step (who, what_do, what_dont, why) and move to Who.
      */
-    public function proceedToQuestions(): void
+    public function proceedToQuestions(AnthropicService $anthropic): void
     {
         $session = $this->session;
 
+        $response = $anthropic->ask(
+            prompt: $this->getQuestionsUserPrompt($session),
+            system: $this->getQuestionsSystemPrompt(),
+            temperature: 0.7,
+        );
+
+        $data = $this->extractJson($response);
+
         $sortOrder = 0;
-        foreach (self::FIXED_QUESTIONS as $step => $question) {
+
+        // Who: 1 question
+        if (! empty($data['who'])) {
             $session->questions()->create([
-                'step' => $step,
-                'question' => $question,
+                'step' => 'who',
+                'question' => is_array($data['who']) ? $data['who']['question'] : $data['who'],
+                'sort_order' => $sortOrder++,
+            ]);
+        }
+
+        // What: 2 questions (do + don't)
+        if (! empty($data['what_do'])) {
+            $session->questions()->create([
+                'step' => 'what',
+                'question' => is_array($data['what_do']) ? $data['what_do']['question'] : $data['what_do'],
+                'sort_order' => $sortOrder++,
+            ]);
+        }
+
+        if (! empty($data['what_dont'])) {
+            $session->questions()->create([
+                'step' => 'what',
+                'question' => is_array($data['what_dont']) ? $data['what_dont']['question'] : $data['what_dont'],
+                'sort_order' => $sortOrder++,
+            ]);
+        }
+
+        // Why: 1 question
+        if (! empty($data['why'])) {
+            $session->questions()->create([
+                'step' => 'why',
+                'question' => is_array($data['why']) ? $data['why']['question'] : $data['why'],
                 'sort_order' => $sortOrder++,
             ]);
         }
@@ -282,28 +312,20 @@ class Diagnose extends Component
     private function getDiagnoseSystemPrompt(): string
     {
         return <<<'PROMPT'
-You are a brutally honest service analyst combining service design,
+You are an expert service analyst combining service design,
 marketing, business strategy, and behavioural psychology.
-
-You are NOT a cheerleader. You are the first honest opinion about
-their service description.
-
-TONE: Write in an Estonian communication style — direct, understated,
-and matter-of-fact. No hype, no exclamation marks, no cheerleading.
-Say what is true plainly. Estonians respect honesty and brevity.
-Avoid American-style enthusiasm or motivational language.
 
 Analyze a freelancer's service description from a POTENTIAL
 CLIENT's perspective. Score 5 dimensions, each 0-2 points:
 1. AUDIENCE (0=missing, 1=broad, 2=specific person+situation)
-2. PROBLEM (0=missing, 1=vague, 2=specific+nameable consequence)
+2. PROBLEM (0=missing, 1=vague, 2=specific+nameable)
 3. OFFER (0=multiple/unclear, 1=identifiable, 2=one clear service)
 4. VALUE (0=missing, 1=generic, 2=specific+differentiated)
 5. LANGUAGE (0=jargon, 1=some jargon, 2=clear+simple)
 
 Also identify strengths and weaknesses.
-Tone: Honest but not harsh. Quote the user's own words in feedback.
-If something is vague, say it directly: "This is too vague because..."
+Tone: Warm but direct. Quote the user's own words in feedback.
+IMPORTANT: Never use the term "ideal client". Always say "best client" instead.
 CRITICAL: Return ONLY valid JSON. No markdown.
 PROMPT;
     }
@@ -332,7 +354,71 @@ Return JSON:
   "strengths": [
     {"area": "...", "feedback": "<1 sentence positive>"}
   ],
-  "coach_message": "<2-3 sentences, honest+direct>"
+  "coach_message": "<2-3 sentences, warm+direct>"
+}
+PROMPT;
+    }
+
+    private function getQuestionsSystemPrompt(): string
+    {
+        return <<<'PROMPT'
+You are a warm, curious service design coach helping a freelancer
+get clearer about their service. Ask open, friendly questions
+that invite them to think and share — not interrogate.
+
+Generate exactly 4 questions, one per key:
+
+WHO — Help them describe who they work best with.
+Ask about the kind of person or situation, not demographics.
+Example: "Who's your best client? Tell me a bit about them
+and what was going on when they reached out to you."
+
+WHAT_DO — Help them describe what they actually do.
+Keep it simple — what's the main thing?
+Example: "In plain words, what do you do for your clients?
+What would they say you helped them with?"
+
+WHAT_DONT — Help them clarify what's outside their scope.
+This sharpens the offer naturally.
+Example: "What's something people sometimes ask you for
+that you don't actually do?"
+
+WHY — Help them describe what changes for the client.
+Focus on results they can see or feel.
+Example: "After working with you, what's different for
+your client? What changes in their work or life?"
+
+RULES:
+- Each question: 1-2 sentences, warm and conversational
+- Never use "ideal client" — always say "best client"
+- Questions should feel like a friendly chat, not an exam
+- Reference weaknesses from the diagnosis to fill gaps
+CRITICAL: Return ONLY valid JSON. No markdown.
+PROMPT;
+    }
+
+    private function getQuestionsUserPrompt(DiagnosisSession $session): string
+    {
+        $diagnosis = json_encode($session->diagnosis);
+
+        return <<<PROMPT
+Original description: \"\"\"{$session->service_description}\"\"\"
+Diagnosis: \"\"\"{$diagnosis}\"\"\"
+
+Help this freelancer get clearer about three things:
+- WHO they work best with (the kind of person or situation)
+- WHAT they do (their main service) and what they don't do
+- WHY clients value them (what changes after working together)
+
+Look at the diagnosis weaknesses. Generate 4 friendly questions
+that help them think about the areas that need the most clarity.
+
+Return JSON:
+{
+  "who": "a warm question about who they work best with...",
+  "what_do": "a question about what they mainly do for clients...",
+  "what_dont": "a question about what falls outside their service...",
+  "why": "a question about what changes for clients after working together..."
 }
 PROMPT;
     }
@@ -340,66 +426,27 @@ PROMPT;
     private function getEvaluateSystemPrompt(): string
     {
         return <<<'PROMPT'
-You are a brutally honest service design coach. You are NOT a
-cheerleader. Your job: check if a freelancer's answer is specific
-enough to build a service description from.
+You are a friendly service design coach reviewing a freelancer's
+answer. Decide if they've shared enough to work with, or if a
+gentle follow-up would help them get clearer.
 
-TONE: Write in an Estonian communication style — direct, understated,
-and matter-of-fact. No hype, no exclamation marks, no cheerleading.
-Say what is true plainly. Estonians respect honesty and brevity.
-Avoid American-style enthusiasm or motivational language.
+GOOD ENOUGH: The answer gives you something to work with —
+a type of person, a real service, or a tangible result.
+Example: "I help restaurant owners set up their online ordering"
+— this is clear and usable even if not hyper-specific.
 
-You evaluate answers to one of three questions:
-1. WHO — "Who do you see as a customer? (Who would have the need for using your service?)"
-2. WHAT — "What will your service solve for customers?"
-3. WHY — "Why would they recommend you to someone else?"
+TOO VAGUE: The answer is so broad it could mean anything.
+Example: "I help businesses grow" or "everyone" — there's
+nothing concrete to build on.
 
-## WHO — Red Flags (TOO VAGUE, probe):
-- "Entrepreneurs"
-- "Small business owners"
-- "Anyone who needs clarity"
-- "People in tech"
-- Any job title without context
+IMPORTANT: Be generous. Most answers are good enough.
+Only ask a follow-up if the answer is truly empty or
+could apply to literally anyone. One useful detail is enough.
 
-## WHO — Green (specific enough, accept):
-- "Founders in their first 2 years who built something but can't explain it"
-- "Solo consultants who've lost 3+ clients because their pitch doesn't land"
-- "Service agencies stuck at 2 people because their positioning confuses leads"
-- Success: You can PICTURE them. They have a stage, situation, or pain signal.
+If follow-up is needed, ask ONE warm question that helps them
+share a bit more. Keep it encouraging, not interrogating.
 
-## WHAT — Red Flags (TOO VAGUE, probe):
-- "Help them communicate better"
-- "Make their service clearer"
-- "Give them strategy"
-- "Help them grow"
-- Anything with no visible consequence
-
-## WHAT — Green (specific enough, accept):
-- "They lose clients because their description confuses buyers"
-- "They pitch investors but can't articulate what they do"
-- "They waste 10+ hours/week re-explaining the same thing"
-- Success: You can SEE the consequence. A real person loses something concrete.
-
-## WHY — Red Flags (TOO VAGUE, probe):
-- "I'm good at it"
-- "I have experience"
-- "I care about clients"
-- "My approach is human-centered"
-- Generic qualities that 10 other people could claim
-
-## WHY — Green (specific enough, accept):
-- "I've been a freelancer who couldn't explain my own service — I know the actual fix"
-- "I only do service positioning — not branding, not websites — so you don't pay for noise"
-- "I force the hard choice in one session instead of six months of workshops"
-- Success: It reveals something about THEM that wouldn't be true of 10 other people.
-
-## RULES:
-- ONE probe per answer. If vague, call it out directly then ask ONE follow-up.
-- If vague, say WHY: "That's what you DO, not the problem you solve."
-- Give examples of what a good answer looks like in your probe.
-- If the answer has ANY concrete detail, accept it and move on.
-- Acknowledge good answers briefly: "That's specific. I can see it."
-
+Never use "ideal client" — always say "best client".
 CRITICAL: Return ONLY valid JSON. No markdown.
 PROMPT;
     }
@@ -407,28 +454,26 @@ PROMPT;
     private function getEvaluateUserPrompt(DiagnosisSession $session, DiagnosisQuestion $question): string
     {
         $stepLabel = match ($question->step) {
-            'who' => 'WHO — Who specifically has this problem?',
-            'what' => 'WHAT — What breaks if this doesn\'t get fixed?',
-            'why' => 'WHY — Why you and not someone else?',
-            default => 'clarifying their service',
+            'who' => 'WHO — describing who they work best with',
+            'what' => 'WHAT — describing their service or what they don\'t do',
+            'why' => 'WHY — what changes for their clients',
+            default => 'getting clearer about their service',
         };
 
         return <<<PROMPT
-A freelancer is clarifying their service positioning.
+A freelancer is getting clearer about their service.
 Step: {$stepLabel}
-
-Their original service description: "{$session->service_description}"
 
 Question asked: "{$question->question}"
 Their answer: "{$question->answer}"
 
-Is this answer specific enough to use, or is it too vague?
-Apply the red/green flag rubric for this step.
+Is there enough here to work with, or would one friendly
+follow-up help them share a bit more?
 
 Return JSON:
 {
   "needs_followup": true|false,
-  "followup_question": "honest probe explaining WHY it's vague + what a good answer looks like" or null
+  "followup_question": "a warm follow-up to help them elaborate" or null
 }
 PROMPT;
     }
@@ -439,34 +484,31 @@ PROMPT;
 You are an expert copywriter combining service design,
 marketing, business strategy, and behavioural psychology.
 
-The freelancer has answered 3 core questions:
-1. WHO — Who specifically has this problem
-2. WHAT — What breaks if this doesn't get fixed
-3. WHY — Why them and not someone else
+The freelancer has made 3 key DECISIONS during this session:
+1. WHO — they named their specific best client and situation
+2. WHAT — they committed to one core service AND drew a boundary
+3. WHY — they claimed a specific, observable outcome
 
-Your job: synthesize their answers into a DRAMATICALLY BETTER
-service description. Every sentence traces back to their answers.
-The new description should sound like the freelancer on their
-best day — clear, confident, specific.
-
-TONE: Write in an Estonian communication style — direct, understated,
-and matter-of-fact. No hype, no exclamation marks, no cheerleading.
-Say what is true plainly. Estonians respect honesty and brevity.
-Avoid American-style enthusiasm or motivational language.
-The result should feel calm and professional, not salesy.
+Your job: turn those decisions into a DRAMATICALLY BETTER
+service description. Every sentence should trace back to one
+of their answers. The new description should sound like the
+freelancer on their best day — clear, confident, specific.
 
 WRITING RULES (non-negotiable):
 1. FIRST PERSON — "I help..." not "This service provides..."
-2. PROBLEM-ANCHORED — Open with the specific consequence they named
-3. ONE CLEAR OFFER — Not a menu of services
-4. OUTCOME FIRST — Lead with what CHANGES
-5. DIFFERENTIATED — Weave their unique angle into the description
+2. SITUATION-ANCHORED — Open with the specific moment/trigger
+   the client named in the WHO step
+3. ONE CLEAR OFFER — Exactly what they committed to in WHAT
+4. OUTCOME FIRST — Lead with the WHY (what changes)
+5. BOUNDED — Weave the "what I don't do" answers into the
+   description to sharpen the offer naturally
 6. CONCRETE — "Can I picture this?" test for every sentence
 7. SHORT — Description: 3-5 sentences. One-liner: <20 words.
 
 BANNED: holistic, synergistic, leverage, transformative,
 innovative, cutting-edge, game-changing, seamless, robust,
 dynamic, paradigm, actionable, empower, disrupt.
+Also BANNED: "ideal client" — always say "best client" instead.
 
 NEXT STEPS: Generate 3 concrete, actionable next steps the user
 should take right now with their new service description. These
@@ -507,17 +549,18 @@ ORIGINAL DESCRIPTION:
 DIAGNOSIS (what was wrong):
 {$diagnosis}
 
-WHO (who specifically has this problem):
+WHO (best client & situation):
 {$whoQA}
 
-WHAT (what breaks if unfixed):
+WHAT (what they do AND what they don't do):
 {$whatQA}
 
-WHY (why them and not someone else):
+WHY (value & outcome):
 {$whyQA}
 
-Synthesize these answers into a clear, specific service description.
-Use the freelancer's own words as raw material.
+USE the answers above as raw material. Weave the user's own words
+into the new description. Use the "don't do" answers to sharpen
+the offer — work them into the description naturally.
 
 Return ONLY this JSON (no markdown, no explanation):
 {
@@ -529,11 +572,9 @@ Return ONLY this JSON (no markdown, no explanation):
     "value": {"score": <0-2>, "reason": "brief reason"},
     "language": {"score": <0-2>, "reason": "brief reason"}
   },
-  "service_description": "<3-5 sentences, first person>",
-  "clear_problem": "<1 sentence: the specific problem synthesized from Q1>",
-  "target_audience": "<1 sentence: the specific audience from Q2>",
-  "unfair_advantage": "<1 sentence: their unique angle from Q3>",
-  "value_proposition": "<1-2 sentences combining problem + outcome>",
+  "service_description": "<3-5 sentences, first person, boundaries woven in>",
+  "value_proposition": "<1-2 sentences>",
+  "target_audience": "<1 sentence, situation-based>",
   "one_liner": "<under 20 words>",
   "next_steps": [
     "concrete action step 1",
